@@ -1,0 +1,24 @@
+# Core server (needed in all modes, including --mock UI development)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pillow>=10.0
+numpy>=1.26
+# Bundled ffmpeg binary (no system install) — used to extract frames from an
+# uploaded video into a photo set. Wheels ship for Win/Linux/macOS.
+imageio-ffmpeg>=0.5
+
+# Real training (needs an NVIDIA GPU + CUDA build of PyTorch).
+# Install PyTorch first following https://pytorch.org/get-started/locally/
+# e.g.:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# then:  pip install gsplat
+# gsplat compiles CUDA kernels on first import (needs a CUDA toolkit / MSVC on Windows,
+# or use their prebuilt wheels: https://docs.gsplat.studio/main/installation.html)
+#
+# torch
+# torchvision
+# gsplat>=1.4
+
+# Camera pose estimation. pycolmap ships prebuilt wheels for Win/Linux/macOS.
+# Alternatively install the COLMAP CLI and it will be used automatically if found.
+pycolmap>=3.10; python_version >= "3.9"

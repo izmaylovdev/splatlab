@@ -1,0 +1,28 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# --- Runtime project data (checkpoints, photos, colmap, snapshots) ---
+# User-generated capture/training data — large binaries, not source.
+/data/
+
+# --- Editor / OS cruft ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- Claude Code ---
+.claude/settings.local.json
+
+# --- Misc ---
+# Model checkpoints / point clouds if produced outside /data
+*.pt
+*.ply

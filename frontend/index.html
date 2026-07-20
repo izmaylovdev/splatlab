@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SplatLab</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%235b9cff'/></svg>">
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b23; --panel2: #1d242e; --border: #2a3341;
+    --text: #e6ebf2; --muted: #8b97a8; --accent: #5b9cff; --accent2: #34d399;
+    --danger: #f87171; --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+    height: 100vh; display: flex; overflow: hidden;
+  }
+  button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 14px; cursor: pointer; font: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  input, select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 8px; font: inherit; width: 100%;
+  }
+  /* ---------- sidebar ---------- */
+  #sidebar {
+    width: 240px; min-width: 240px; background: var(--panel);
+    border-right: 1px solid var(--border); display: flex; flex-direction: column;
+  }
+  #sidebar header { padding: 16px 14px 10px; }
+  #sidebar h1 { margin: 0 0 2px; font-size: 17px; }
+  #sidebar h1 span { color: var(--accent); }
+  #mockBadge { display:none; font-size: 11px; color: var(--warn); }
+  #projList { flex: 1; overflow-y: auto; padding: 6px; }
+  .proj {
+    padding: 9px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 3px;
+    border: 1px solid transparent;
+  }
+  .proj:hover { background: var(--panel2); }
+  .proj.active { background: var(--panel2); border-color: var(--accent); }
+  .proj .pname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proj .pmeta { font-size: 12px; color: var(--muted); }
+  #newProj { margin: 10px; }
+  /* ---------- main ---------- */
+  #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  #empty { flex:1; display:flex; align-items:center; justify-content:center; color: var(--muted); }
+  #proj { flex: 1; display: none; flex-direction: column; overflow: hidden; }
+  #topbar {
+    display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+    border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap;
+  }
+  #topbar h2 { margin: 0; font-size: 16px; }
+  .badge {
+    font-size: 12px; padding: 2px 10px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  .badge.training { color: var(--accent2); border-color: var(--accent2); }
+  .badge.poses { color: var(--warn); border-color: var(--warn); }
+  .badge.error { color: var(--danger); border-color: var(--danger); }
+  #stageDetail { font-size: 12px; color: var(--muted); max-width: 340px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #topbar .spacer { flex: 1; }
+  /* ---------- content grid ---------- */
+  #content { flex: 1; display: grid; overflow: hidden; gap: 10px; padding: 10px;
+    grid-template-columns: 330px 1fr; grid-template-rows: minmax(0,1fr) 210px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); }
+  #leftCol { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow-y: auto; grid-row: 1 / 3; }
+  /* upload */
+  #drop {
+    border: 1.5px dashed var(--border); border-radius: 10px; padding: 18px 10px;
+    text-align: center; color: var(--muted); cursor: pointer; transition: .15s;
+  }
+  #drop.hover, #drop:hover { border-color: var(--accent); color: var(--text); }
+  #uploadStat { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .row { display: flex; gap: 8px; margin-top: 8px; }
+  .row > * { flex: 1; }
+  /* settings */
+  .set { display: grid; grid-template-columns: 1fr 86px; gap: 6px; align-items: center;
+    margin-bottom: 6px; font-size: 13px; color: var(--muted); }
+  /* stats */
+  #stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .stat { background: var(--panel2); border-radius: 8px; padding: 8px 10px; }
+  .stat .v { font-size: 17px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .l { font-size: 11px; color: var(--muted); }
+  /* viewer */
+  #viewerCard { position: relative; padding: 0; }
+  #viewer3d { position: absolute; inset: 0; border-radius: 12px; overflow: hidden; }
+  #viewerOverlay {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--muted); pointer-events: none; z-index: 2; text-align: center;
+  }
+  #viewerTag { position: absolute; top: 10px; left: 12px; z-index: 3; font-size: 12px;
+    color: var(--muted); background: rgba(14,17,22,.7); padding: 3px 9px; border-radius: 999px; }
+  /* bottom row */
+  #bottomRow { display: grid; grid-template-columns: 300px 1fr 1fr; gap: 10px; min-height: 0; }
+  #liveImg { width: 100%; height: 100%; object-fit: contain; background: #000;
+    border-radius: 8px; min-height: 0; flex: 1; }
+  canvas.chart { width: 100%; height: 100%; flex: 1; min-height: 0; }
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px; min-width: 320px;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  #toast {
+    position: fixed; bottom: 18px; right: 18px; background: var(--panel2);
+    border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    padding: 10px 14px; border-radius: 8px; display: none; max-width: 380px; z-index: 99;
+  }
+  #toast.err { border-left-color: var(--danger); }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <header>
+    <h1>Splat<span>Lab</span></h1>
+    <div id="mockBadge">MOCK MODE — no GPU used</div>
+  </header>
+  <div id="projList"></div>
+  <button id="newProj" class="primary">+ New project</button>
+</div>
+
+<div id="main">
+  <div id="empty">Create a project to get started</div>
+  <div id="proj">
+    <div id="topbar">
+      <h2 id="pName"></h2>
+      <span class="badge" id="pStatus">new</span>
+      <span id="stageDetail"></span>
+      <span class="spacer"></span>
+      <button id="btnTrain" class="primary">▶ Start training</button>
+      <button id="btnStop" style="display:none">■ Stop</button>
+      <button id="btnExport">Export .ply</button>
+      <button id="btnDelete" class="danger">Delete</button>
+    </div>
+
+    <div id="content">
+      <div id="leftCol">
+        <div class="card">
+          <h3>Photos</h3>
+          <div id="drop">
+            <b>Upload photos or a video</b><br>
+            <span style="font-size:12px">click to choose a folder, or drag &amp; drop<br>30–300 overlapping photos — or a short clip that pans around the subject</span>
+          </div>
+          <input type="file" id="dirInput" webkitdirectory multiple style="display:none">
+          <input type="file" id="filesInput" multiple accept="image/*" style="display:none">
+          <input type="file" id="videoInput" accept="video/*" style="display:none">
+          <div id="uploadStat">no photos yet</div>
+          <div class="row">
+            <button id="btnFiles">Add single files</button>
+            <button id="btnVideo">Upload video</button>
+            <button id="btnClearPhotos" class="danger">Clear</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Stats</h3>
+          <div id="stats">
+            <div class="stat"><div class="v" id="stStep">–</div><div class="l">step</div></div>
+            <div class="stat"><div class="v" id="stGauss">–</div><div class="l">gaussians</div></div>
+            <div class="stat"><div class="v" id="stLoss">–</div><div class="l">loss</div></div>
+            <div class="stat"><div class="v" id="stPsnr">–</div><div class="l">PSNR (dB)</div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Settings</h3>
+          <div class="set"><span>Iterations</span><input id="cfgSteps" type="number" min="100" step="500"></div>
+          <div class="set"><span>Snapshot every</span><input id="cfgSnap" type="number" min="50" step="50"></div>
+          <div class="set"><span>Live frame every</span><input id="cfgFrame" type="number" min="1"></div>
+          <div class="set"><span>SH degree</span><input id="cfgSh" type="number" min="0" max="3"></div>
+          <div class="set"><span>Max image side</span><input id="cfgSide" type="number" min="400" step="100"></div>
+          <div class="set"><span>Matcher</span>
+            <select id="cfgMatcher">
+              <option value="auto">auto</option>
+              <option value="exhaustive">exhaustive</option>
+              <option value="sequential">sequential</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" id="viewerCard">
+        <div id="viewerTag">3D viewer</div>
+        <div id="viewer3d"></div>
+        <div id="viewerOverlay">The interactive splat viewer appears here<br>after the first snapshot</div>
+      </div>
+
+      <div id="bottomRow" style="grid-column: 2">
+        <div class="card"><h3>Live training view</h3><img id="liveImg" alt=""></div>
+        <div class="card"><h3>Loss</h3><canvas id="lossChart" class="chart"></canvas></div>
+        <div class="card"><h3>PSNR</h3><canvas id="psnrChart" class="chart"></canvas></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<dialog id="dlgNew">
+  <h3 style="margin-top:0">New project</h3>
+  <input id="npName" placeholder="e.g. garden-statue" style="margin-bottom:14px">
+  <div class="row">
+    <button onclick="dlgNew.close()">Cancel</button>
+    <button class="primary" id="npCreate">Create</button>
+  </div>
+</dialog>
+
+<div id="toast"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "/static/vendor/three.module.js",
+    "@mkkellogg/gaussian-splats-3d": "/static/vendor/gaussian-splats-3d.module.js"
+  }
+}
+</script>
+
+<script type="module">
+// The splat-viewer library is loaded lazily so the app still works
+// (upload, training, charts, live view) if the CDN is unreachable.
+let GaussianSplats3D = null;
+let viewerLibFailed = false;
+let viewerLibPromise = null;
+function ensureViewerLib() {
+  if (!viewerLibPromise) viewerLibPromise = _loadViewerLib();
+  return viewerLibPromise;
+}
+async function _loadViewerLib() {
+  if (GaussianSplats3D || viewerLibFailed) return GaussianSplats3D;
+  try {
+    GaussianSplats3D = await import('@mkkellogg/gaussian-splats-3d');
+  } catch (e) {
+    console.error('viewer library failed to load', e);
+    viewerLibFailed = true;
+    const ov = document.getElementById('viewerOverlay');
+    ov.style.display = 'flex';
+    ov.innerHTML = '3D viewer unavailable — the renderer library failed to load.<br>' +
+      'Snapshots are still saved; open the exported .ply in SuperSplat or any splat viewer.';
+  }
+  return GaussianSplats3D;
+}
+
+const $ = (id) => document.getElementById(id);
+const api = async (path, opts = {}) => {
+  const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+};
+function toast(msg, isErr = false) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = isErr ? 'err' : '';
+  t.style.display = 'block';
+  clearTimeout(t._h);
+  t._h = setTimeout(() => (t.style.display = 'none'), 4200);
+}
+
+// ---------------------------------------------------------------- state
+let projects = [];
+let current = null;         // project object
+let sock = null;
+let lossPts = [];           // {step, loss}
+let psnrPts = [];
+let pendingSnapshotUrl = null;
+let mockMode = false;
+
+// ---------------------------------------------------------------- charts
+function drawChart(canvas, pts, key, color, fmt) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w || !h) return;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  if (pts.length < 2) {
+    ctx.fillStyle = '#8b97a8'; ctx.font = '12px sans-serif';
+    ctx.fillText('waiting for data…', 10, h / 2);
+    return;
+  }
+  const pad = { l: 42, r: 8, t: 8, b: 18 };
+  const xs = pts.map(p => p.step), ys = pts.map(p => p[key]);
+  const x0 = xs[0], x1 = xs[xs.length - 1];
+  let y0 = Math.min(...ys), y1 = Math.max(...ys);
+  if (y1 - y0 < 1e-9) { y1 = y0 + 1; }
+  const X = s => pad.l + (s - x0) / Math.max(1, x1 - x0) * (w - pad.l - pad.r);
+  const Y = v => h - pad.b - (v - y0) / (y1 - y0) * (h - pad.t - pad.b);
+  // grid + y labels
+  ctx.strokeStyle = '#242d3a'; ctx.fillStyle = '#8b97a8'; ctx.font = '10px sans-serif';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const v = y0 + (y1 - y0) * i / 3, y = Y(v);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    ctx.fillText(fmt(v), 4, y + 3);
+  }
+  ctx.fillText(String(x0), pad.l, h - 5);
+  const lbl = String(x1);
+  ctx.fillText(lbl, w - pad.r - ctx.measureText(lbl).width, h - 5);
+  // line
+  ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.beginPath();
+  const step = Math.max(1, Math.floor(pts.length / (w - pad.l - pad.r)));
+  for (let i = 0; i < pts.length; i += step) {
+    const p = pts[i];
+    i === 0 ? ctx.moveTo(X(p.step), Y(p[key])) : ctx.lineTo(X(p.step), Y(p[key]));
+  }
+  ctx.lineTo(X(pts[pts.length - 1].step), Y(pts[pts.length - 1][key]));
+  ctx.stroke();
+}
+let chartDirty = false;
+function scheduleCharts() {
+  if (chartDirty) return;
+  chartDirty = true;
+  requestAnimationFrame(() => {
+    chartDirty = false;
+    drawChart($('lossChart'), lossPts, 'loss', '#5b9cff', v => v.toFixed(3));
+    drawChart($('psnrChart'), psnrPts, 'psnr', '#34d399', v => v.toFixed(1));
+  });
+}
+window.addEventListener('resize', scheduleCharts);
+
+// ---------------------------------------------------------------- 3D viewer
+let viewer = null;
+let viewerLoading = false;
+let savedCam = null;
+
+async function loadSnapshot(url) {
+  if (!(await ensureViewerLib())) return;
+  if (viewerLoading) { pendingSnapshotUrl = url; return; }
+  viewerLoading = true;
+  $('viewerOverlay').style.display = 'none';
+  try {
+    if (viewer) {
+      try {
+        savedCam = {
+          pos: viewer.camera.position.toArray(),
+          look: viewer.controls ? viewer.controls.target.toArray() : [0, 0, 0],
+        };
+        await viewer.dispose();
+      } catch (e) { /* ignore */ }
+      viewer = null;
+      $('viewer3d').innerHTML = '';
+    }
+    viewer = new GaussianSplats3D.Viewer({
+      rootElement: $('viewer3d'),
+      cameraUp: [0, -1, 0],
+      initialCameraPosition: savedCam ? savedCam.pos : [0, 0, -5],
+      initialCameraLookAt: savedCam ? savedCam.look : [0, 0, 0],
+      sharedMemoryForWorkers: false,
+      gpuAcceleratedSort: false,
+      selfDrivenMode: true,
+    });
+    await viewer.addSplatScene(url, {
+      format: GaussianSplats3D.SceneFormat.Ply,
+      showLoadingUI: false,
+      progressiveLoad: false,
+      splatAlphaRemovalThreshold: 5,
+    });
+    viewer.start();
+    $('viewerTag').textContent = '3D viewer — ' + decodeURIComponent(url.split('/').pop());
+  } catch (e) {
+    console.error('viewer load failed', e);
+    $('viewerOverlay').style.display = 'flex';
+    $('viewerOverlay').textContent = 'Failed to load snapshot: ' + e.message;
+  } finally {
+    viewerLoading = false;
+    if (pendingSnapshotUrl && pendingSnapshotUrl !== url) {
+      const next = pendingSnapshotUrl;
+      pendingSnapshotUrl = null;
+      loadSnapshot(next);
+    } else {
+      pendingSnapshotUrl = null;
+    }
+  }
+}
+
+// ---------------------------------------------------------------- projects
+async function refreshProjects(selectId) {
+  projects = await api('/api/projects');
+  const list = $('projList');
+  list.innerHTML = '';
+  for (const p of projects) {
+    const el = document.createElement('div');
+    el.className = 'proj' + (current && current.id === p.id ? ' active' : '');
+    el.innerHTML = `<div class="pname"></div><div class="pmeta"></div>`;
+    el.querySelector('.pname').textContent = p.name;
+    el.querySelector('.pmeta').textContent = `${p.num_photos} photos · ${p.status}`;
+    el.onclick = () => selectProject(p.id);
+    list.appendChild(el);
+  }
+  if (selectId) selectProject(selectId);
+}
+
+function setStatusBadge(status) {
+  const b = $('pStatus');
+  b.textContent = status;
+  b.className = 'badge' +
+    (status === 'training' ? ' training'
+      : status === 'processing_poses' ? ' poses'
+      : status === 'error' ? ' error' : '');
+  const running = status === 'training' || status === 'processing_poses';
+  $('btnTrain').style.display = running ? 'none' : '';
+  $('btnStop').style.display = running ? '' : 'none';
+}
+
+async function selectProject(pid) {
+  const p = projects.find(x => x.id === pid) || await api('/api/projects/' + pid);
+  current = p;
+  $('empty').style.display = 'none';
+  $('proj').style.display = 'flex';
+  $('pName').textContent = p.name;
+  $('stageDetail').textContent = p.error || '';
+  setStatusBadge(p.status);
+  updatePhotoStat(p.num_photos);
+  const c = p.config;
+  $('cfgSteps').value = c.max_steps;
+  $('cfgSnap').value = c.snapshot_every;
+  $('cfgFrame').value = c.frame_every;
+  $('cfgSh').value = c.sh_degree;
+  $('cfgSide').value = c.max_image_side;
+  $('cfgMatcher').value = c.colmap_matcher;
+  lossPts = []; psnrPts = [];
+  $('stStep').textContent = $('stGauss').textContent =
+    $('stLoss').textContent = $('stPsnr').textContent = '–';
+  $('liveImg').src = '';
+  scheduleCharts();
+  document.querySelectorAll('.proj').forEach(el => el.classList.remove('active'));
+  refreshProjects();  // re-render highlight lazily
+  connectWS(pid);
+}
+
+function updatePhotoStat(n) {
+  $('uploadStat').textContent = n ? `${n} photos uploaded` : 'no photos yet';
+}
+
+// ---------------------------------------------------------------- websocket
+function connectWS(pid) {
+  if (sock) { sock.onclose = null; sock.close(); }
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const s = new WebSocket(`${proto}://${location.host}/ws/${pid}`);
+  sock = s;
+  s.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    handleEvent(m);
+  };
+  s.onclose = () => {
+    if (sock === s && current && current.id === pid) {
+      setTimeout(() => { if (current && current.id === pid) connectWS(pid); }, 1500);
+    }
+  };
+}
+
+function handleEvent(m) {
+  switch (m.type) {
+    case 'hello': {
+      const p = m.project;
+      setStatusBadge(p.status);
+      if (p.stage) $('stageDetail').textContent = `${p.stage.stage}: ${p.stage.detail}`;
+      for (const h of m.history) pushProgress(h, true);
+      scheduleCharts();
+      if (m.latest_snapshot) loadSnapshot(m.latest_snapshot);
+      break;
+    }
+    case 'status':
+      $('stageDetail').textContent = `${m.stage}: ${m.detail || ''}`;
+      if (['features', 'matching', 'mapping', 'undistort'].includes(m.stage)) {
+        setStatusBadge('processing_poses');
+      } else if (['init', 'training'].includes(m.stage)) {
+        setStatusBadge('training');
+      }
+      break;
+    case 'progress':
+      pushProgress(m);
+      break;
+    case 'frame':
+      $('liveImg').src = 'data:image/jpeg;base64,' + m.jpeg_b64;
+      break;
+    case 'snapshot':
+      loadSnapshot(m.url);
+      break;
+    case 'done':
+      setStatusBadge('done');
+      $('stageDetail').textContent = `finished at step ${m.step}`;
+      if (m.url) loadSnapshot(m.url);
+      toast('Training finished 🎉');
+      refreshProjects();
+      break;
+    case 'error':
+      setStatusBadge('error');
+      $('stageDetail').textContent = m.message;
+      toast(m.message, true);
+      refreshProjects();
+      break;
+  }
+}
+
+function pushProgress(m, silent = false) {
+  lossPts.push({ step: m.step, loss: m.loss });
+  psnrPts.push({ step: m.step, psnr: m.psnr });
+  if (lossPts.length > 4000) { lossPts.splice(0, 1000); psnrPts.splice(0, 1000); }
+  if (!silent) {
+    $('stStep').textContent = `${m.step.toLocaleString()} / ${m.max_steps.toLocaleString()}`;
+    $('stGauss').textContent = m.num_gaussians.toLocaleString();
+    $('stLoss').textContent = m.loss.toFixed(4);
+    $('stPsnr').textContent = m.psnr.toFixed(2);
+    scheduleCharts();
+  }
+}
+
+// ---------------------------------------------------------------- uploads
+async function uploadFiles(fileList) {
+  const files = [...fileList].filter(f =>
+    /\.(jpe?g|png|webp|tiff?|bmp)$/i.test(f.name));
+  if (!files.length) { toast('No image files found in selection', true); return; }
+  const BATCH = 25;
+  let done = 0;
+  for (let i = 0; i < files.length; i += BATCH) {
+    const fd = new FormData();
+    for (const f of files.slice(i, i + BATCH)) fd.append('files', f, f.name);
+    const r = await fetch(`/api/projects/${current.id}/photos`, { method: 'POST', body: fd });
+    if (!r.ok) { toast('Upload failed: ' + (await r.json().catch(()=>({}))).detail, true); return; }
+    done += Math.min(BATCH, files.length - i);
+    $('uploadStat').textContent = `uploading… ${done}/${files.length}`;
+  }
+  const p = await api('/api/projects/' + current.id);
+  updatePhotoStat(p.num_photos);
+  toast(`Uploaded ${files.length} photos`);
+  refreshProjects();
+}
+
+async function uploadVideo(file) {
+  if (!file) return;
+  const frames = 150;
+  $('uploadStat').textContent = `extracting frames from ${file.name}…`;
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  const r = await fetch(`/api/projects/${current.id}/video?frames=${frames}`,
+                        { method: 'POST', body: fd });
+  if (!r.ok) {
+    toast('Video upload failed: ' + ((await r.json().catch(()=>({}))).detail || r.status), true);
+    const p = await api('/api/projects/' + current.id);
+    updatePhotoStat(p.num_photos);
+    return;
+  }
+  const res = await r.json();
+  updatePhotoStat(res.total);
+  toast(`Extracted ${res.saved} frames from video`);
+  refreshProjects();
+}
+
+$('drop').onclick = () => $('dirInput').click();
+$('btnFiles').onclick = () => $('filesInput').click();
+$('btnVideo').onclick = () => $('videoInput').click();
+$('dirInput').onchange = (e) => uploadFiles(e.target.files);
+$('filesInput').onchange = (e) => uploadFiles(e.target.files);
+$('videoInput').onchange = (e) => uploadVideo(e.target.files[0]);
+$('drop').ondragover = (e) => { e.preventDefault(); $('drop').classList.add('hover'); };
+$('drop').ondragleave = () => $('drop').classList.remove('hover');
+$('drop').ondrop = async (e) => {
+  e.preventDefault();
+  $('drop').classList.remove('hover');
+  // support dropping a folder via webkitGetAsEntry
+  const files = [];
+  const walk = (entry) => new Promise((res) => {
+    if (entry.isFile) entry.file(f => { files.push(f); res(); });
+    else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const readAll = () => reader.readEntries(async (entries) => {
+        if (!entries.length) return res();
+        await Promise.all(entries.map(walk));
+        readAll();
+      });
+      readAll();
+    } else res();
+  });
+  const items = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (items.length) await Promise.all(items.map(walk));
+  else files.push(...e.dataTransfer.files);
+  const video = files.find(f => /\.(mp4|mov|m4v|avi|mkv|webm|wmv|mpe?g)$/i.test(f.name));
+  if (video) return uploadVideo(video);
+  uploadFiles(files);
+};
+
+$('btnClearPhotos').onclick = async () => {
+  if (!confirm('Remove all photos from this project?')) return;
+  await api(`/api/projects/${current.id}/photos`, { method: 'DELETE' });
+  updatePhotoStat(0);
+  refreshProjects();
+};
+
+// ---------------------------------------------------------------- controls
+$('btnTrain').onclick = async () => {
+  const config = {
+    max_steps: +$('cfgSteps').value,
+    snapshot_every: +$('cfgSnap').value,
+    frame_every: +$('cfgFrame').value,
+    sh_degree: +$('cfgSh').value,
+    max_image_side: +$('cfgSide').value,
+    colmap_matcher: $('cfgMatcher').value,
+  };
+  lossPts = []; psnrPts = [];
+  scheduleCharts();
+  try {
+    await api(`/api/projects/${current.id}/train`, {
+      method: 'POST', body: JSON.stringify({ config }),
+    });
+    setStatusBadge('processing_poses');
+    toast(mockMode ? 'Mock training started' : 'Computing camera poses, then training…');
+  } catch (e) { toast(e.message, true); }
+};
+$('btnStop').onclick = async () => {
+  await api(`/api/projects/${current.id}/stop`, { method: 'POST' });
+  toast('Stopping…');
+};
+$('btnExport').onclick = () => {
+  window.location = `/api/projects/${current.id}/export`;
+};
+$('btnDelete').onclick = async () => {
+  if (!confirm(`Delete project "${current.name}" and all its data?`)) return;
+  await api('/api/projects/' + current.id, { method: 'DELETE' });
+  current = null;
+  if (sock) sock.close();
+  $('proj').style.display = 'none';
+  $('empty').style.display = 'flex';
+  refreshProjects();
+};
+
+// ---------------------------------------------------------------- new project
+$('newProj').onclick = () => { $('npName').value = ''; $('dlgNew').showModal(); $('npName').focus(); };
+$('npCreate').onclick = async () => {
+  const p = await api('/api/projects', {
+    method: 'POST', body: JSON.stringify({ name: $('npName').value }),
+  });
+  $('dlgNew').close();
+  await refreshProjects(p.id);
+};
+$('npName').onkeydown = (e) => { if (e.key === 'Enter') $('npCreate').click(); };
+
+// ---------------------------------------------------------------- boot
+(async () => {
+  try {
+    const h = await api('/api/health');
+    mockMode = h.mock;
+    $('mockBadge').style.display = h.mock ? 'block' : 'none';
+  } catch (e) { /* ignore */ }
+  await refreshProjects();
+  if (projects.length) selectProject(projects[0].id);
+})();
+</script>
+</body>
+</html>
