@@ -110,6 +110,33 @@ bash deploy/run_worker.sh          # or, on a fresh vast.ai box: bash deploy/vas
 bash deploy/run_api.sh             # → http://localhost:8000
 ```
 
+### Automatic GPU rental (Vast.ai pool)
+
+Instead of hand-provisioning the worker in step 2, the control plane can rent GPU
+boxes on demand and release them when idle. Run two extra control-plane processes:
+
+```bash
+bash deploy/run_control.sh                    # workflow orchestrator (no GPU)
+VAST_API_KEY=… bash deploy/run_pool.sh        # autoscaler: rents/reaps vast.ai boxes
+```
+
+The **pool** ([`server/vast/pool.py`](server/vast/pool.py)) watches how many
+training workflows need a GPU and keeps the fleet sized to match — renting the
+cheapest offer that meets your filters, keeping a just-used box **warm** for reuse,
+and reaping it after `SPLATLAB_POOL_IDLE_TIMEOUT`. Boxes only ever run the GPU
+activities; the **control worker** runs the workflow itself so a run survives every
+box being reaped. Teardown never depends on a single workflow: a crashed box is
+reaped by stale-heartbeat, a leaked instance by the orphan sweep, and every box by
+`SPLATLAB_POOL_MAX_LIFETIME` — so a paid GPU is never left running unmanaged.
+
+Requirements: `SPLATLAB_STORAGE=s3` (boxes share no filesystem with the API), and
+`TEMPORAL_ADDRESS` / `REDIS_URL` / `SPLATLAB_S3_ENDPOINT` set to addresses a remote
+box can reach (public host or a mesh net — **not** `localhost`); the pool forwards
+these onto each box. Key knobs live in [`server/config.py`](server/config.py):
+`VAST_GPU_NAME`, `VAST_MAX_PRICE`, `SPLATLAB_POOL_MAX_BOXES`,
+`SPLATLAB_POOL_IDLE_TIMEOUT`, `VAST_IMAGE`, `VAST_REPO_URL`. `SPLATLAB_POOL_PAUSED=1`
+drains the whole fleet to zero.
+
 Open http://localhost:8000. Storage defaults to the local disk backend
 (`SPLATLAB_STORAGE=local`, API + worker sharing `data/`); set `SPLATLAB_STORAGE=s3`
 with the `SPLATLAB_S3_*` env vars to run the worker on a **remote** GPU box that

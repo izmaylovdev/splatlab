@@ -76,7 +76,12 @@ async def run_colmap_activity(args: ColmapArgs) -> ColmapResult:
     except Exception as e:  # noqa: BLE001  (CancelledError is BaseException — passes through)
         emit({"type": "error", "message": f"{type(e).__name__}: {e}"})
         raise
-    return ColmapResult(undistorted_uri=undist)
+
+    # Publish the undistorted dataset so a *different* box can train from it
+    # (no-op on the local backend). Return a portable project-relative handle.
+    rel = os.path.relpath(undist, storage.project_dir(pid)).replace(os.sep, "/")
+    storage.upload_dir(pid, rel)
+    return ColmapResult(undistorted_rel=rel)
 
 
 def _read(path: str) -> str | None:

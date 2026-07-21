@@ -18,7 +18,7 @@ from server.config import TASK_QUEUE, workflow_id
 
 @activity.defn(name="run_colmap_activity")
 async def stub_colmap(a: ColmapArgs) -> ColmapResult:
-    return ColmapResult(undistorted_uri=f"/tmp/{a.project_id}/undist")
+    return ColmapResult(undistorted_rel=f"colmap/undistorted")
 
 
 @activity.defn(name="train_activity")

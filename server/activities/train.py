@@ -41,7 +41,10 @@ async def train_activity(args: TrainArgs) -> TrainResult:
     stop = threading.Event()
 
     def blocking() -> None:
-        ds = load_colmap_dataset(args.undistorted_uri, cfg.max_image_side)
+        # On the pool, COLMAP may have run on another box — pull its uploaded
+        # undistorted dataset down locally first (no-op on the local backend).
+        undist = storage.ensure_dir_local(pid, args.undistorted_rel)
+        ds = load_colmap_dataset(undist, cfg.max_image_side)
         real_train(ds, storage.project_dir(pid), cfg, emit, stop)
 
     try:

@@ -22,6 +22,7 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 from temporalio.workflow import ActivityCancellationType
 
 with workflow.unsafe.imports_passed_through():
+    from .. import config
     from ..activities.colmap import run_colmap_activity
     from ..activities.train import train_activity
     from .types import ColmapArgs, TrainArgs, TrainParams
@@ -29,6 +30,18 @@ with workflow.unsafe.imports_passed_through():
 # Expensive, side-effectful activities: no auto-retry (a transient blip must not
 # silently burn hours of GPU / stack OOM). Failures surface to the user instead.
 _NO_RETRY = RetryPolicy(maximum_attempts=1)
+
+# The workflow runs on the always-on control plane; the GPU work is dispatched to
+# the pool-managed GPU queue, where an ephemeral Vast.ai box picks it up. Reading
+# the queue name at import time is deterministic (it's fixed config, not I/O), so
+# it's safe inside the workflow.
+_GPU_QUEUE = config.GPU_TASK_QUEUE
+
+# A GPU box may not exist the instant a run is queued — the autoscaler needs a
+# reconcile cycle plus cold-boot time to bring one online. Give the activity a
+# generous schedule-to-start window so it waits in the queue for a box instead of
+# failing; start-to-close still bounds the actual run once a box picks it up.
+_SCHEDULE_TO_START = timedelta(minutes=30)
 
 
 @workflow.defn
@@ -49,6 +62,8 @@ class SplatTrainingWorkflow:
             self._task = workflow.start_activity(
                 run_colmap_activity,
                 ColmapArgs(p.project_id, p.config.get("colmap_matcher", "auto"), p.run_id),
+                task_queue=_GPU_QUEUE,
+                schedule_to_start_timeout=_SCHEDULE_TO_START,
                 start_to_close_timeout=timedelta(hours=3),
                 heartbeat_timeout=timedelta(minutes=5),
                 cancellation_type=ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
@@ -61,7 +76,9 @@ class SplatTrainingWorkflow:
             self._stage = {"stage": "init", "detail": "initializing"}
             self._task = workflow.start_activity(
                 train_activity,
-                TrainArgs(p.project_id, p.config, colmap.undistorted_uri, p.run_id),
+                TrainArgs(p.project_id, p.config, colmap.undistorted_rel, p.run_id),
+                task_queue=_GPU_QUEUE,
+                schedule_to_start_timeout=_SCHEDULE_TO_START,
                 start_to_close_timeout=timedelta(hours=12),
                 heartbeat_timeout=timedelta(seconds=60),
                 cancellation_type=ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,

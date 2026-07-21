@@ -45,7 +45,9 @@ async def start_training(pid: str, cfg: dict[str, Any], run_id: str) -> None:
             WORKFLOW_TYPE,
             TrainParams(project_id=pid, config=cfg, run_id=run_id),
             id=config.workflow_id(pid),
-            task_queue=config.TASK_QUEUE,
+            # Workflow runs on the always-on control plane; it dispatches the
+            # GPU activities to the pool-managed GPU queue itself.
+            task_queue=config.CONTROL_TASK_QUEUE,
             # Reject a second concurrent run for the same project; allow a fresh
             # run once the previous one has closed.
             id_conflict_policy=WorkflowIDConflictPolicy.FAIL,

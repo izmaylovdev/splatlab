@@ -11,6 +11,14 @@
 # Dev shortcut: instead of the temporal/postgresql services here you can run
 # `temporal server start-dev` (in-memory, UI on :8233) and only bring up redis +
 # minio from this file.
+#
+# App processes run from source (not in this compose). On the control plane:
+#   bash deploy/run_api.sh        # HTTP/WS API
+#   bash deploy/run_control.sh    # control worker: runs SplatTrainingWorkflow
+#   VAST_API_KEY=... bash deploy/run_pool.sh   # GPU autoscaler (rents/reaps boxes)
+# GPU boxes are then rented automatically by the pool — no manual worker needed.
+# (A single co-located box can still run everything with `bash deploy/run_worker.sh`,
+# which defaults to SPLATLAB_WORKER_ROLE=both.)
 services:
   postgresql:
     image: postgres:16

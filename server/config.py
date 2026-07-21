@@ -19,7 +19,14 @@ def _env(name: str, default: str) -> str:
 # ---- Temporal ---------------------------------------------------------------
 TEMPORAL_ADDRESS = _env("TEMPORAL_ADDRESS", "localhost:7233")
 TEMPORAL_NAMESPACE = _env("TEMPORAL_NAMESPACE", "default")
-TASK_QUEUE = _env("SPLATLAB_TASK_QUEUE", "splat-gpu")
+# GPU_TASK_QUEUE: the queue the (ephemeral, pool-rented) GPU boxes poll — COLMAP
+# and training activities run here. CONTROL_TASK_QUEUE: the always-on control
+# plane that runs the workflow itself (and thus survives every GPU box being
+# reaped). TASK_QUEUE stays as an alias of GPU_TASK_QUEUE for backwards compat
+# (SPLATLAB_TASK_QUEUE still points a worker at the GPU queue).
+GPU_TASK_QUEUE = _env("SPLATLAB_TASK_QUEUE", "splat-gpu")
+CONTROL_TASK_QUEUE = _env("SPLATLAB_CONTROL_QUEUE", "splat-control")
+TASK_QUEUE = GPU_TASK_QUEUE  # legacy alias
 
 # ---- Redis (live telemetry bus) --------------------------------------------
 REDIS_URL = _env("REDIS_URL", "redis://localhost:6379")
@@ -53,3 +60,45 @@ WORKFLOW_ID_PREFIX = "train-"
 
 def workflow_id(project_id: str) -> str:
     return f"{WORKFLOW_ID_PREFIX}{project_id}"
+
+
+# ---- Vast.ai GPU pool (autoscaler) -----------------------------------------
+# The pool (server.vast.pool) rents/reaps GPU boxes on demand so the control
+# plane never has to keep an idle GPU running. All settings are optional; the
+# pool refuses to start without VAST_API_KEY.
+VAST_API_KEY = os.environ.get("VAST_API_KEY") or None
+VAST_API_BASE = _env("VAST_API_BASE", "https://console.vast.ai/api/v0")
+
+# Offer search filters. VAST_GPU_NAME uses Vast's underscored form (e.g.
+# "RTX_4090"); empty = any GPU meeting the other bars.
+VAST_GPU_NAME = os.environ.get("VAST_GPU_NAME") or ""
+VAST_MIN_GPU_RAM_GB = float(_env("VAST_MIN_GPU_RAM_GB", "16"))
+VAST_MIN_RELIABILITY = float(_env("VAST_MIN_RELIABILITY", "0.98"))
+VAST_MAX_PRICE = float(_env("VAST_MAX_PRICE", "0.60"))   # $/hr ceiling per box
+VAST_NUM_GPUS = int(_env("VAST_NUM_GPUS", "1"))
+VAST_DISK_GB = int(_env("VAST_DISK_GB", "40"))
+# Docker image the box boots into. Must have CUDA + git; vast_setup.sh installs
+# the rest on first boot. Override with a prebaked image to cut cold start.
+VAST_IMAGE = _env("VAST_IMAGE", "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime")
+# Repo the onstart script clones onto a fresh box (branch optional).
+VAST_REPO_URL = _env("VAST_REPO_URL", "https://github.com/izamylovdev/splatlab.git")
+VAST_REPO_BRANCH = _env("VAST_REPO_BRANCH", "main")
+# Label stamped on every instance we create — the pool only ever touches boxes
+# carrying this label, so it can never destroy someone else's instance.
+VAST_LABEL = _env("VAST_LABEL", "splatlab-pool")
+
+# Scaling knobs.
+POOL_MAX_BOXES = int(_env("SPLATLAB_POOL_MAX_BOXES", "3"))
+POOL_JOBS_PER_BOX = int(_env("SPLATLAB_POOL_JOBS_PER_BOX", "2"))  # match worker MAX_ACTIVITIES
+POOL_IDLE_TIMEOUT = int(_env("SPLATLAB_POOL_IDLE_TIMEOUT", "600"))     # reap an idle box after Ns
+POOL_MAX_LIFETIME = int(_env("SPLATLAB_POOL_MAX_LIFETIME", str(6 * 3600)))  # hard cap per box
+POOL_RECONCILE_INTERVAL = int(_env("SPLATLAB_POOL_INTERVAL", "30"))    # reconcile loop period
+# A box whose registry heartbeat is older than this is treated as dead and reaped
+# even if it never reported idle (covers a crashed worker / hung box).
+POOL_HEARTBEAT_DEADLINE = int(_env("SPLATLAB_POOL_HEARTBEAT_DEADLINE", "120"))
+# How long to allow a freshly-rented box to boot + register before we treat it as
+# a failed launch and destroy it.
+POOL_BOOT_DEADLINE = int(_env("SPLATLAB_POOL_BOOT_DEADLINE", str(20 * 60)))
+# Kill switch: when set truthy, the pool drains the whole fleet to zero and rents
+# nothing (for emergencies / cost freezes).
+POOL_PAUSED = _env("SPLATLAB_POOL_PAUSED", "").lower() in ("1", "true", "yes")

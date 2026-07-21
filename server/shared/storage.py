@@ -60,6 +60,19 @@ class Storage:
         """Push a locally-written file (rel to project_dir) to the store."""
         ...
 
+    def upload_dir(self, pid: str, rel: str) -> None:
+        """Push a locally-written *directory* subtree (rel to project_dir) to the
+        store. Used to hand an intermediate dataset (COLMAP's undistorted output)
+        from the box that produced it to whichever box consumes it next.
+        No-op on the local backend."""
+        ...
+
+    def ensure_dir_local(self, pid: str, rel: str) -> str:
+        """Worker-side inverse of ``upload_dir``: guarantee the subtree exists
+        under a local dir; return its absolute path. On the local backend this is
+        just the existing shared path."""
+        ...
+
     def list_snapshots(self, pid: str) -> list[str]:
         """Sorted rel paths like 'snapshots/step_000500.ply'."""
         ...
@@ -140,6 +153,12 @@ class LocalDiskStorage(Storage):
     # artifacts
     def upload_artifact(self, pid: str, rel: str) -> None:
         return  # already on the shared disk
+
+    def upload_dir(self, pid: str, rel: str) -> None:
+        return  # already on the shared disk
+
+    def ensure_dir_local(self, pid: str, rel: str) -> str:
+        return os.path.join(self._pdir(pid), rel)
 
     def list_snapshots(self, pid: str) -> list[str]:
         d = os.path.join(self._pdir(pid), "snapshots")
@@ -281,6 +300,26 @@ class S3Storage(Storage):
     def upload_artifact(self, pid: str, rel: str) -> None:
         local = os.path.join(self.project_dir(pid), rel)
         self._client.upload_file(local, self.bucket, self._key(pid, rel))
+
+    def upload_dir(self, pid: str, rel: str) -> None:
+        base = os.path.join(self.project_dir(pid), rel)
+        if not os.path.isdir(base):
+            return
+        for root, _, files in os.walk(base):
+            for name in files:
+                local = os.path.join(root, name)
+                sub = os.path.relpath(local, self.project_dir(pid)).replace(os.sep, "/")
+                self._client.upload_file(local, self.bucket, self._key(pid, sub))
+
+    def ensure_dir_local(self, pid: str, rel: str) -> str:
+        dest = os.path.join(self.project_dir(pid), rel)
+        prefix = self._key(pid, rel.rstrip("/") + "/")
+        for key in self._list(prefix):
+            local = os.path.join(self.project_dir(pid), key[len(pid) + 1:])
+            if not os.path.exists(local):
+                os.makedirs(os.path.dirname(local), exist_ok=True)
+                self._client.download_file(self.bucket, key, local)
+        return dest
 
     def list_snapshots(self, pid: str) -> list[str]:
         prefix = self._key(pid, SNAP_PREFIX)

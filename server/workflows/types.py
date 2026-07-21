@@ -26,16 +26,20 @@ class ColmapArgs:
 
 @dataclass
 class ColmapResult:
-    # Local path (on the GPU worker) to the undistorted dataset dir. The dataset
-    # can be many GB, so we pass this handle, never the bytes.
-    undistorted_uri: str
+    # Project-*relative* path (e.g. "colmap/undistorted") to the undistorted
+    # dataset dir. Relative — not an absolute box-local path — because on the pool
+    # the training activity may run on a *different* box than COLMAP did; the
+    # producer uploads the subtree (upload_dir) and the consumer re-materializes
+    # it (ensure_dir_local). The dataset can be many GB, so we pass this handle,
+    # never the bytes.
+    undistorted_rel: str
 
 
 @dataclass
 class TrainArgs:
     project_id: str
     config: dict[str, Any]
-    undistorted_uri: str
+    undistorted_rel: str
     run_id: str
 
 
