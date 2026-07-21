@@ -1,0 +1,10 @@
+# Test-only dependencies (not needed to run the API or worker).
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# tests/test_api_integration.py  — API routes + storage + emit contract (fast, no infra)
+# tests/test_workflow_e2e.py     — runs SplatTrainingWorkflow against a local Temporal
+#                                  server the SDK downloads on first run (happy path + stop)
+-r requirements.txt
+pytest>=8.0
+httpx>=0.27
+fakeredis>=2.20

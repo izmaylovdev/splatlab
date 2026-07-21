@@ -1,0 +1,71 @@
+# SplatLab control plane: Temporal (+ Postgres), Redis, MinIO.
+#
+# This is everything the API service and the GPU worker depend on. Bring it up
+# on the box that runs the API (the worker connects to these addresses; on a
+# remote GPU worker, expose these ports or tunnel to them).
+#
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# Then:  Temporal UI http://localhost:8233   MinIO console http://localhost:9001
+#
+# Dev shortcut: instead of the temporal/postgresql services here you can run
+# `temporal server start-dev` (in-memory, UI on :8233) and only bring up redis +
+# minio from this file.
+services:
+  postgresql:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    depends_on:
+      - postgresql
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: postgresql
+    ports:
+      - "7233:7233"        # gRPC — TEMPORAL_ADDRESS
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8233:8080"        # Temporal Web UI
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6379:6379"        # REDIS_URL
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: splatlab
+      MINIO_ROOT_PASSWORD: splatlab-secret
+    volumes:
+      - miniodata:/data
+    ports:
+      - "9000:9000"        # S3 API — SPLATLAB_S3_ENDPOINT
+      - "9001:9001"        # console
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

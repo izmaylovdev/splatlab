@@ -1,9 +1,16 @@
-# Core server (needed in all modes, including --mock UI development)
+# Core API service + worker
 fastapi>=0.110
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9
 pillow>=10.0
 numpy>=1.26
+
+# Durable orchestration + live telemetry bus (both API and worker)
+temporalio>=1.7
+redis>=5.0
+# Object storage bridge between a remote GPU worker and the API.
+# Only needed when SPLATLAB_STORAGE=s3 (MinIO / S3); harmless otherwise.
+boto3>=1.34
 # Bundled ffmpeg binary (no system install) — used to extract frames from an
 # uploaded video into a photo set. Wheels ship for Win/Linux/macOS.
 imageio-ffmpeg>=0.5

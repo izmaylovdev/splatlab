@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
-# SplatLab — vast.ai (Linux/CUDA) bootstrap.
+# SplatLab — vast.ai (Linux/CUDA) worker bootstrap.
 #
-# Run this ON the vast.ai instance, from the repo root, after the code is on the box
-# (git clone or scp — see README / deploy notes). It creates a venv, installs the
-# server + CUDA PyTorch + gsplat, verifies the GPU, and (unless --no-run) starts the
-# web server bound to 0.0.0.0 so you can reach the UI from your laptop.
+# Run this ON the vast.ai GPU instance, from the repo root, after the code is on
+# the box (git clone or scp). It creates a venv, installs the server deps + CUDA
+# PyTorch + gsplat, verifies the GPU, and (unless --no-run) starts the Temporal
+# WORKER, which connects out to the control plane (Temporal + Redis, and MinIO/S3
+# on the s3 backend).
 #
-#   bash deploy/vast_setup.sh                # set up, verify, then run the server
+#   bash deploy/vast_setup.sh                # set up, verify, then run the worker
 #   bash deploy/vast_setup.sh --no-run       # set up + verify only
-#   PORT=8080 bash deploy/vast_setup.sh      # override the port (default 8000)
 #
-# Reach the UI from your laptop either via the vast "Open Ports" mapping for $PORT,
-# or an SSH tunnel:  ssh -p <SSH_PORT> -N -L 8000:localhost:8000 root@<HOST>
+# The worker connects OUT — point it at your control plane and reach those from
+# the box directly or via SSH reverse tunnels, e.g.:
+#   ssh -p <SSH_PORT> -N -R 7233:localhost:7233 -R 6379:localhost:6379 root@<HOST>
+# then run with TEMPORAL_ADDRESS=localhost:7233 REDIS_URL=redis://localhost:6379.
 #
 # Tunables (env vars):
-#   PORT           web server port                (default 8000)
-#   HOST           bind address                   (default 0.0.0.0 — needed for remote access)
+#   TEMPORAL_ADDRESS  control-plane Temporal gRPC   (default localhost:7233)
+#   REDIS_URL         control-plane Redis           (default redis://localhost:6379)
+#   SPLATLAB_STORAGE  local | s3                    (default local)
 #   PY             python interpreter             (default python3)
 #   TORCH_VERSION  torch version                  (default 2.4.1)
 #   TV_VERSION     torchvision version            (default 0.19.1)
@@ -78,17 +81,20 @@ else
 fi
 
 echo "==> Environment check"
-python -m backend.check
+python -m server.shared.check
+
+export TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-localhost:7233}"
+export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
+export SPLATLAB_STORAGE="${SPLATLAB_STORAGE:-local}"
 
 if [ "$RUN_SERVER" = "1" ]; then
   echo
-  echo "==> Starting SplatLab on http://$HOST:$PORT"
-  echo "    (reach it via the vast Open-Ports mapping for $PORT, or an SSH -L tunnel)"
+  echo "==> Starting SplatLab worker (Temporal=$TEMPORAL_ADDRESS, storage=$SPLATLAB_STORAGE)"
   echo "    Tip: run this inside 'tmux' so it survives disconnects."
-  exec python -m backend.main --host "$HOST" --port "$PORT"
+  exec bash deploy/run_worker.sh
 else
   echo
-  echo "==> Setup complete. To start the server:"
+  echo "==> Setup complete. To start the worker:"
   echo "    source .venv/bin/activate"
-  echo "    python -m backend.main --host $HOST --port $PORT"
+  echo "    bash deploy/run_worker.sh"
 fi

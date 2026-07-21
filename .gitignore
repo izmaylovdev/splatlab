@@ -26,3 +26,6 @@ Thumbs.db
 # Model checkpoints / point clouds if produced outside /data
 *.pt
 *.ply
+
+# Temporal dev-server logs written by tests/test_workflow_e2e.py
+local_server*.log
