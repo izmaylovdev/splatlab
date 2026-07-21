@@ -1,4 +1,4 @@
-"""Environment check: python -m backend.check"""
+"""Environment check: python -m server.shared.check"""
 from __future__ import annotations
 
 import shutil

@@ -40,8 +40,13 @@ def export_ply(
         # Inria layout: f_rest is [K coeffs of R..., K of G..., K of B...]
         data[:, col:col + n_rest] = shN.transpose(0, 2, 1).reshape(n, n_rest)
         col += n_rest
-    op = np.clip(opacities, eps, 1 - eps)
-    data[:, col] = np.log(op / (1 - op))          # stored as logit
+    # Clamp opacity away from 0/1 *in float64*: 1 - 1e-9 rounds to exactly 1.0
+    # in float32, so a naive clip still leaves opacity==1 -> logit == +inf, and
+    # those inf values pollute the .ply and break strict web viewers
+    # (GaussianSplats3D poisons its GPU sort to NaN -> nothing renders). A 1e-6
+    # margin keeps the logit finite (|logit| <= ~13.8) and is visually identical.
+    op = np.clip(opacities.astype(np.float64), 1e-6, 1.0 - 1e-6)
+    data[:, col] = np.log(op / (1 - op)).astype(np.float32)     # stored as logit
     data[:, col + 1:col + 4] = np.log(np.maximum(scales, eps))  # stored as log
     data[:, col + 4:col + 8] = quats
 

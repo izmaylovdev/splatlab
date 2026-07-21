@@ -9,24 +9,42 @@ while you watch it converge in the browser:
 - **Interactive 3D viewer** — periodic `.ply` snapshots of the model are loaded into an
   in-browser WebGL Gaussian-splat renderer you can orbit/zoom while training runs.
 - **Loss & Gaussian-count charts** updating in real time.
-- **Mock mode** — develop / demo the UI on any machine with no GPU.
+- **Durable jobs** — the COLMAP→train→export pipeline runs as a [Temporal](https://temporal.io)
+  workflow on a **separate GPU worker**, so a control-plane restart never loses an
+  in-flight training run, and the GPU box can live anywhere (e.g. vast.ai).
+
+## Architecture
+
+Three tiers, one repo. The **client** is a static app; the **API service** is the
+control plane (no GPU) that starts/cancels/queries Temporal workflows and serves
+telemetry; the **worker** (GPU box) runs the actual pipeline as a workflow.
+
+```
+client (static)  ──REST+WS──►  API service  ──►  Temporal  ──►  worker (GPU)
+                                    ▲  subscribe        dispatch      │ emit
+                                    └──────────────  Redis  ◄─────────┘
+                                snapshots/photos ──►  S3 / MinIO
+```
 
 ```
 splatlab/
-├── backend/
-│   ├── main.py            FastAPI app: REST + WebSocket + static frontend
-│   ├── projects.py        project store & job manager (threads, event bus)
-│   ├── colmap_runner.py   photos → COLMAP poses (pycolmap or colmap CLI)
-│   ├── colmap_io.py       parser for COLMAP binary/text sparse models
-│   ├── dataset.py         COLMAP model → training tensors
-│   ├── trainer.py         real gsplat training loop (CUDA)
-│   ├── mock_trainer.py    GPU-free fake trainer (same event interface)
-│   └── splat_export.py    export Gaussians → standard 3DGS .ply
-├── frontend/
-│   ├── index.html         single-file UI (charts, live view, controls)
-│   └── vendor/            three.js + GaussianSplats3D (vendored — works offline)
+├── client/               static UI (was frontend/); config.js sets the API/WS base
+│   ├── index.html        single-file UI (charts, live view, controls)
+│   └── vendor/           three.js + GaussianSplats3D (vendored — works offline)
+├── server/
+│   ├── config.py         env-driven settings (Temporal, Redis, storage)
+│   ├── api/              FastAPI control plane: REST + WebSocket + /files
+│   ├── worker/           Temporal worker entrypoint (runs on the GPU box)
+│   ├── workflows/        SplatTrainingWorkflow (durable orchestration)
+│   ├── activities/       run_colmap / train activities + Redis emitter
+│   └── shared/           trainer, colmap_runner, dataset, storage, events, …
+├── deploy/
+│   ├── docker-compose.yml  control plane: Temporal + Postgres + Redis + MinIO
+│   ├── run_api.sh          launch the API service
+│   ├── run_worker.sh       launch the GPU worker
+│   └── vast_setup.sh       one-shot GPU-box (vast.ai) bootstrap → worker
 ├── requirements.txt
-└── data/                  created at runtime: one folder per project
+└── data/                 local scratch / artifact store (local backend)
 ```
 
 ## Setup
@@ -66,19 +84,38 @@ pip install -r requirements.txt
 ### Check your setup
 
 ```bash
-python -m backend.check
+python -m server.shared.check
 ```
 
 Prints what was found: CUDA device, gsplat, pycolmap / colmap CLI.
 
 ## Run
 
+**1. Control plane** (Temporal + Redis; MinIO too if using the S3 backend):
+
 ```bash
-python -m backend.main            # real mode (needs GPU for training)
-python -m backend.main --mock     # UI demo mode, no GPU needed
+docker compose -f deploy/docker-compose.yml up -d
+# dev shortcut: `temporal server start-dev` + a local redis instead
 ```
 
-Open http://localhost:8000
+**2. Worker** (the GPU box — connects out to the control plane):
+
+```bash
+bash deploy/run_worker.sh          # or, on a fresh vast.ai box: bash deploy/vast_setup.sh
+```
+
+**3. API service** (control plane; also serves the client in co-located dev):
+
+```bash
+bash deploy/run_api.sh             # → http://localhost:8000
+```
+
+Open http://localhost:8000. Storage defaults to the local disk backend
+(`SPLATLAB_STORAGE=local`, API + worker sharing `data/`); set `SPLATLAB_STORAGE=s3`
+with the `SPLATLAB_S3_*` env vars to run the worker on a **remote** GPU box that
+shares artifacts with the API through MinIO/S3. To host the client separately,
+serve `client/` from any static host and edit `client/config.js` to point
+`SPLATLAB_API_BASE` / `SPLATLAB_WS_BASE` at the API's origin.
 
 ## Workflow
 
@@ -95,7 +132,9 @@ Open http://localhost:8000
 
 - Training parameters (iterations, snapshot cadence, SH degree, densification)
   are in the "Settings" panel per project; defaults are sane for ~100-photo scenes.
-- Everything the server writes lives under `data/<project-id>/`:
-  `photos/`, `colmap/`, `snapshots/`, `checkpoint.pt`.
-- The WebSocket protocol (for building your own client) is documented at the top
-  of `backend/projects.py`.
+- Artifacts live under `data/<project-id>/` on the local backend
+  (`photos/`, `colmap/`, `snapshots/`, `checkpoint.pt`); on the S3 backend the
+  same layout is keyed under `<project-id>/` in the bucket.
+- The live WebSocket protocol (for building your own client) is documented at the
+  top of `server/shared/events.py`; the durable job state lives in Temporal and is
+  visible in the Temporal UI (http://localhost:8233).

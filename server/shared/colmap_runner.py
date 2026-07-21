@@ -113,36 +113,79 @@ def _run_cli(image_dir, db, sparse, undist, matcher, use_gpu, progress: Progress
     ], progress, "undistort")
 
 
+def _colmap_threads() -> int:
+    """Worker-thread cap for pycolmap.
+
+    COLMAP's default (-1) uses every core. On very-high-core hosts (e.g. a
+    192-vCPU cloud box) that spawns hundreds of SIFT + BLAS threads and can
+    corrupt the heap during matching ("BLAS: Bad memory unallocation" ->
+    SIGABRT), taking the whole server down. A modest cap avoids that and is
+    still plenty fast, since matching/extraction stay well parallelised.
+    Override with SPLATLAB_COLMAP_THREADS.
+    """
+    env = os.environ.get("SPLATLAB_COLMAP_THREADS")
+    if env and env.isdigit() and int(env) > 0:
+        return int(env)
+    return min(16, os.cpu_count() or 8)
+
+
 def _run_pycolmap(image_dir, db, sparse, undist, matcher, progress: ProgressCb):
     import pycolmap  # imported lazily so mock mode never needs it
 
-    progress("features", "extracting SIFT features (pycolmap)")
+    nthreads = _colmap_threads()
+
+    progress("features", f"extracting SIFT features (pycolmap, {nthreads} threads)")
+    reader_options = pycolmap.ImageReaderOptions()
+    reader_options.camera_model = "OPENCV"
     try:
-        # newer pycolmap (>=0.6 / 4.x): camera_model lives in reader_options
-        reader_options = pycolmap.ImageReaderOptions()
-        reader_options.camera_model = "OPENCV"
+        # pycolmap 4.x: the thread cap lives on FeatureExtractionOptions
+        ext_opts = pycolmap.FeatureExtractionOptions()
+        ext_opts.num_threads = nthreads
         pycolmap.extract_features(
             db, image_dir,
             camera_mode=pycolmap.CameraMode.SINGLE,
             reader_options=reader_options,
+            extraction_options=ext_opts,
         )
-    except TypeError:
-        # older pycolmap accepted camera_model as a direct kwarg
-        pycolmap.extract_features(
-            db, image_dir,
-            camera_model="OPENCV",
-            camera_mode=pycolmap.CameraMode.SINGLE,
-        )
-    progress("matching", f"{matcher} matching")
+    except (TypeError, AttributeError):
+        # older pycolmap: no FeatureExtractionOptions / different kwargs
+        try:
+            pycolmap.extract_features(
+                db, image_dir,
+                camera_mode=pycolmap.CameraMode.SINGLE,
+                reader_options=reader_options,
+            )
+        except TypeError:
+            pycolmap.extract_features(
+                db, image_dir,
+                camera_model="OPENCV",
+                camera_mode=pycolmap.CameraMode.SINGLE,
+            )
+
+    def _match(fn):
+        try:
+            mo = pycolmap.FeatureMatchingOptions()
+            mo.num_threads = nthreads
+            fn(db, matching_options=mo)
+        except (TypeError, AttributeError):
+            fn(db)
+
+    progress("matching", f"{matcher} matching ({nthreads} threads)")
     if matcher == "exhaustive":
-        pycolmap.match_exhaustive(db)
+        _match(pycolmap.match_exhaustive)
     else:
         try:
-            pycolmap.match_sequential(db)
+            _match(pycolmap.match_sequential)
         except AttributeError:
-            pycolmap.match_exhaustive(db)
+            _match(pycolmap.match_exhaustive)
+
     progress("mapping", "incremental mapping (this is the slow part)")
-    maps = pycolmap.incremental_mapping(db, image_dir, sparse)
+    try:
+        map_opts = pycolmap.IncrementalPipelineOptions()
+        map_opts.num_threads = nthreads
+        maps = pycolmap.incremental_mapping(db, image_dir, sparse, options=map_opts)
+    except (TypeError, AttributeError):
+        maps = pycolmap.incremental_mapping(db, image_dir, sparse)
     if not maps:
         raise RuntimeError("Mapping failed — no reconstruction. Check photo overlap.")
     # keep the largest reconstruction
