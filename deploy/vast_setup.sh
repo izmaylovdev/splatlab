@@ -76,9 +76,15 @@ echo "==> SplatLab vast.ai bootstrap  (torch $TORCH_VERSION+$CUDA_TAG, port $POR
 # The slim CUDA runtime base has no python/git/curl. Install them (plus the
 # system libs pycolmap/opencv need at runtime) before anything else. On a fat
 # image that already has them this is a fast no-op.
+#
+# NOTE: some images ship the `python3` binary but NOT the venv module (ensurepip),
+# so checking for the command alone isn't enough — `python3 -m venv` then fails
+# with "ensurepip is not available". Probe ensurepip explicitly and install when
+# any piece is missing.
 if ! command -v python3 >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1 \
-   || ! command -v curl >/dev/null 2>&1; then
-  echo "==> Installing base tools (python3, git, curl, runtime libs)"
+   || ! command -v curl >/dev/null 2>&1 \
+   || ! python3 -c 'import ensurepip' >/dev/null 2>&1; then
+  echo "==> Installing base tools (python3 + venv, git, curl, runtime libs)"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   apt-get install -y --no-install-recommends \
