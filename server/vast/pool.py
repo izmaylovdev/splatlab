@@ -152,7 +152,9 @@ class Pool:
                 min_reliability=config.VAST_MIN_RELIABILITY,
                 max_price=config.VAST_MAX_PRICE,
                 num_gpus=config.VAST_NUM_GPUS,
-                limit=max(10, n * 3),
+                min_inet_mbps=config.VAST_MIN_INET_MBPS,
+                verification=config.VAST_VERIFICATION,
+                limit=max(20, n * 5),
             )
         except VastError as e:
             _log(f"offer search failed: {e}")

@@ -49,6 +49,28 @@ GSPLAT_WHEEL="${GSPLAT_WHEEL:-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
+# emit_stage <name>: best-effort boot progress to the control-plane Redis. The
+# first one that lands proves the box reached the Mac over the tailnet with the
+# right creds — the visibility we were missing when boxes hung in "booting".
+# No-op until the venv (with redis) is active; failures never abort the boot.
+emit_stage() {
+  [ -n "${REDIS_URL:-}" ] || return 0
+  command -v python >/dev/null 2>&1 || return 0
+  SPLATLAB_STAGE="$1" python - <<'PY' 2>/dev/null || true
+import os, time
+try:
+    import redis
+    r = redis.Redis.from_url(os.environ["REDIS_URL"], socket_connect_timeout=5, socket_timeout=5)
+    bid = os.environ.get("SPLATLAB_BOX_ID", "box")
+    key = f"splatlab:box:{bid}:boot"
+    r.hset(key, mapping={"stage": os.environ["SPLATLAB_STAGE"], "ts": int(time.time())})
+    r.expire(key, 3600)
+    print(f"[boot] stage -> {os.environ['SPLATLAB_STAGE']}")
+except Exception:
+    pass
+PY
+}
+
 echo "==> SplatLab vast.ai bootstrap  (torch $TORCH_VERSION+$CUDA_TAG, port $PORT)"
 
 # ---- Tailscale --------------------------------------------------------------
@@ -97,10 +119,13 @@ python -m pip install --upgrade pip
 
 echo "==> Installing server requirements"
 pip install -r requirements.txt
+# First Redis contact: if this lands, tailnet + creds + reachability all work.
+emit_stage deps-installed
 
 echo "==> Installing CUDA PyTorch ($TORCH_VERSION / $TV_VERSION, $CUDA_TAG)"
 pip install "torch==$TORCH_VERSION" "torchvision==$TV_VERSION" \
   --index-url "https://download.pytorch.org/whl/$CUDA_TAG"
+emit_stage torch-installed
 
 if [ "$GSPLAT_WHEEL" = "1" ]; then
   # Prebuilt wheel — skips the on-import CUDA compile. Index is torch/cuda specific;
@@ -113,6 +138,8 @@ else
   pip install gsplat
 fi
 
+emit_stage gsplat-installed
+
 echo "==> Environment check"
 python -m server.shared.check
 
@@ -124,6 +151,7 @@ if [ "$RUN_SERVER" = "1" ]; then
   echo
   echo "==> Starting SplatLab worker (Temporal=$TEMPORAL_ADDRESS, storage=$SPLATLAB_STORAGE)"
   echo "    Tip: run this inside 'tmux' so it survives disconnects."
+  emit_stage worker-starting
   exec bash deploy/run_worker.sh
 else
   echo

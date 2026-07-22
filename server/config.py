@@ -74,8 +74,17 @@ VAST_API_BASE = _env("VAST_API_BASE", "https://console.vast.ai/api/v0")
 # meeting the other bars.
 VAST_GPU_NAME = os.environ.get("VAST_GPU_NAME") or ""
 VAST_MIN_GPU_RAM_GB = float(_env("VAST_MIN_GPU_RAM_GB", "16"))
-VAST_MIN_RELIABILITY = float(_env("VAST_MIN_RELIABILITY", "0.98"))
+VAST_MIN_RELIABILITY = float(_env("VAST_MIN_RELIABILITY", "0.99"))
 VAST_MAX_PRICE = float(_env("VAST_MAX_PRICE", "0.60"))   # $/hr ceiling per box
+# Host-quality bars (dodge flaky community boxes that can't hold a tunnel).
+# Minimum measured internet down speed (Mbps) — low-bandwidth hosts struggle to
+# pull the image / join the tailnet. Applied as an API filter.
+VAST_MIN_INET_MBPS = float(_env("VAST_MIN_INET_MBPS", "200"))
+# Required host verification tier, matched client-side against each offer's
+# `verification` field ("verified" = datacenter-grade, "unverified" = community,
+# "deverified" = flagged-bad). "verified" is safest; "" disables the check;
+# "not-deverified" keeps verified+unverified but drops flagged hosts.
+VAST_VERIFICATION = _env("VAST_VERIFICATION", "verified")
 VAST_NUM_GPUS = int(_env("VAST_NUM_GPUS", "1"))
 VAST_DISK_GB = int(_env("VAST_DISK_GB", "40"))
 # Docker image the box boots into. Must have CUDA + git; vast_setup.sh installs

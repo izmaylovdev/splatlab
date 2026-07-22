@@ -83,11 +83,15 @@ class VastClient:
     # ---- offers -------------------------------------------------------------
     async def search_offers(self, *, gpu_name: str = "", min_gpu_ram_gb: float = 0,
                             min_reliability: float = 0, max_price: float = 0,
-                            num_gpus: int = 1, limit: int = 20) -> list[dict[str, Any]]:
+                            num_gpus: int = 1, min_inet_mbps: float = 0,
+                            verification: str = "", limit: int = 20) -> list[dict[str, Any]]:
         """Return rentable on-demand offers matching the filter, cheapest first.
 
         Prices are `dph_total` ($/hr including the machine). GPU RAM in the API is
-        `gpu_ram` (MB per GPU).
+        `gpu_ram` (MB per GPU); `inet_down` is Mbps. `verification` is filtered
+        client-side (the API's verified filter is unreliable): "verified" keeps
+        only datacenter-grade hosts, "not-deverified" drops flagged-bad hosts, ""
+        disables the check.
         """
         q: dict[str, Any] = {
             "rentable": {"eq": True},
@@ -103,12 +107,20 @@ class VastClient:
             q["gpu_ram"] = {"gte": min_gpu_ram_gb * 1024}
         if min_reliability:
             q["reliability2"] = {"gte": min_reliability}
+        if min_inet_mbps:
+            q["inet_down"] = {"gte": min_inet_mbps}
         if max_price:
             q["dph_total"] = {"lte": max_price}
         # POST with the filter sent FLAT (the old `PUT /bundles/` with {"q": ...}
         # now 404s).
         body = await self._request("POST", "/bundles/", json=q)
-        return body.get("offers", []) if isinstance(body, dict) else []
+        offers = body.get("offers", []) if isinstance(body, dict) else []
+        # Verification is unreliable as a server filter — enforce it here.
+        if verification == "not-deverified":
+            offers = [o for o in offers if o.get("verification") != "deverified"]
+        elif verification:
+            offers = [o for o in offers if o.get("verification") == verification]
+        return offers
 
     # ---- instances ----------------------------------------------------------
     async def create_instance(self, offer_id: int, *, image: str, disk_gb: int,
