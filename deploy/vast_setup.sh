@@ -73,6 +73,20 @@ PY
 
 echo "==> SplatLab vast.ai bootstrap  (torch $TORCH_VERSION+$CUDA_TAG, port $PORT)"
 
+# ---- Base tools -------------------------------------------------------------
+# The slim CUDA runtime base has no python/git/curl. Install them (plus the
+# system libs pycolmap/opencv need at runtime) before anything else. On a fat
+# image that already has them this is a fast no-op.
+if ! command -v python3 >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1 \
+   || ! command -v curl >/dev/null 2>&1; then
+  echo "==> Installing base tools (python3, git, curl, runtime libs)"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get install -y --no-install-recommends \
+    python3 python3-venv python3-pip git curl ca-certificates \
+    libgl1 libgomp1 libglib2.0-0
+fi
+
 # ---- Tailscale --------------------------------------------------------------
 # Join the tailnet so the worker can dial the (NAT'd, laptop-local) control plane
 # at its stable tailnet address. Skipped when TS_AUTHKEY is unset (e.g. a box on

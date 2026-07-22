@@ -87,9 +87,11 @@ VAST_MIN_INET_MBPS = float(_env("VAST_MIN_INET_MBPS", "200"))
 VAST_VERIFICATION = _env("VAST_VERIFICATION", "verified")
 VAST_NUM_GPUS = int(_env("VAST_NUM_GPUS", "1"))
 VAST_DISK_GB = int(_env("VAST_DISK_GB", "40"))
-# Docker image the box boots into. Must have CUDA + git; vast_setup.sh installs
-# the rest on first boot. Override with a prebaked image to cut cold start.
-VAST_IMAGE = _env("VAST_IMAGE", "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime")
+# Docker image the box boots into. A slim CUDA *runtime* base (~2.5GB) instead of
+# the 7GB PyTorch image — the bootstrap pip-installs torch/gsplat anyway, so the
+# baked-in copy was dead weight that made image pulls stall on many hosts.
+# vast_setup.sh apt-installs python/git/curl + runtime libs on first boot.
+VAST_IMAGE = _env("VAST_IMAGE", "nvidia/cuda:12.1.1-runtime-ubuntu22.04")
 # Repo the onstart script clones onto a fresh box (branch optional).
 VAST_REPO_URL = _env("VAST_REPO_URL", "https://github.com/izmaylovdev/splatlab.git")
 VAST_REPO_BRANCH = _env("VAST_REPO_BRANCH", "main")
