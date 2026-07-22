@@ -61,17 +61,24 @@ if [ -n "${TS_AUTHKEY:-}" ]; then
     curl -fsSL https://tailscale.com/install.sh | sh
   fi
   # Vast instances are containers without systemd; run tailscaled ourselves.
+  # The runtime + state dirs don't exist on a fresh box — tailscaled won't create
+  # its socket's parent, so make them first (this was the boot-hang bug).
+  mkdir -p /var/run/tailscale /var/lib/tailscale /dev/net
   # Ensure the TUN device exists (needs CAP_MKNOD, present on Vast instances).
-  if [ ! -c /dev/net/tun ]; then
-    mkdir -p /dev/net && mknod /dev/net/tun c 10 200 || true
-  fi
+  [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200 || true
   if ! pgrep -x tailscaled >/dev/null 2>&1; then
     tailscaled --state=/var/lib/tailscale/tailscaled.state \
                --socket=/var/run/tailscale/tailscaled.sock >/var/log/tailscaled.log 2>&1 &
-    sleep 2
   fi
-  tailscale up --authkey="$TS_AUTHKEY" --hostname="splatlab-${SPLATLAB_BOX_ID:-box}" \
-               --accept-routes ${TS_EXTRA_ARGS:-}
+  # Wait for the daemon socket to come up (fixed sleeps race on a cold box).
+  for _ in $(seq 1 30); do [ -S /var/run/tailscale/tailscaled.sock ] && break; sleep 1; done
+  # Don't let a tailnet failure abort the whole bootstrap silently — surface it.
+  if ! tailscale up --authkey="$TS_AUTHKEY" --hostname="splatlab-${SPLATLAB_BOX_ID:-box}" \
+                    --accept-routes ${TS_EXTRA_ARGS:-}; then
+    echo "!! tailscale up failed — tailscaled log:" >&2
+    tail -n 30 /var/log/tailscaled.log >&2 || true
+    exit 1
+  fi
   echo "    tailnet IP: $(tailscale ip -4 2>/dev/null || echo '?')"
 fi
 
