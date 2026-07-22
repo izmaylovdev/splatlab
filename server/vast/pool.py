@@ -63,12 +63,13 @@ async def _open_workflow_count(temporal) -> int:
 
 
 # ---- box bootstrap ----------------------------------------------------------
-# A rented box reaches the (laptop-local) control plane over a Tailscale tailnet:
-# the box joins the tailnet on boot with TS_AUTHKEY, then dials the Mac at its
-# stable tailnet address. So the addresses forwarded to the box are DIFFERENT
-# from the ones the pool itself uses (the pool talks to Temporal/Redis by their
-# in-compose service names). The box-facing values come from the BOX_* env vars,
-# each falling back to the pool's own setting when it isn't overridden.
+# A rented box reaches the (laptop-local) control plane over ngrok: the Mac runs
+# `deploy/ngrok_up.sh`, which exposes Temporal/Redis/MinIO as public TCP addresses
+# and writes them into deploy/.env as BOX_*. The box dials those addresses OUT
+# (nothing to install on the box, no TUN). So the addresses forwarded to the box
+# are DIFFERENT from the ones the pool itself uses (the pool talks to
+# Temporal/Redis by their in-compose service names). The box-facing values come
+# from the BOX_* env vars, each falling back to the pool's own setting when unset.
 #
 # Env forwarded verbatim (creds + bootstrap tunables — same value for pool & box).
 _FORWARD_ENV = (
@@ -76,8 +77,6 @@ _FORWARD_ENV = (
     "SPLATLAB_S3_BUCKET", "SPLATLAB_S3_REGION",
     "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
     "SPLATLAB_S3_ACCESS_KEY", "SPLATLAB_S3_SECRET_KEY",
-    # Tailscale: joins the box to the tailnet so it can reach the Mac.
-    "TS_AUTHKEY", "TS_EXTRA_ARGS",
     # bootstrap tunables consumed by deploy/vast_setup.sh
     "TORCH_VERSION", "TV_VERSION", "CUDA_TAG", "GSPLAT_WHEEL",
 )
@@ -89,7 +88,7 @@ def _box_env(box_id: str) -> dict[str, str]:
 
     # Box-facing addresses: prefer the explicit BOX_* override, else the pool's
     # own value. In the Docker stack the pool connects via service names but sets
-    # BOX_* to the Mac's tailnet address (see deploy/docker-compose.yml).
+    # BOX_* to the Mac's ngrok public addresses (see deploy/docker-compose.yml).
     def _box_addr(box_key: str, own: str) -> str:
         return os.environ.get(box_key) or own
 

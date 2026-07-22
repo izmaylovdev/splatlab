@@ -78,7 +78,7 @@ VAST_MIN_RELIABILITY = float(_env("VAST_MIN_RELIABILITY", "0.99"))
 VAST_MAX_PRICE = float(_env("VAST_MAX_PRICE", "0.60"))   # $/hr ceiling per box
 # Host-quality bars (dodge flaky community boxes that can't hold a tunnel).
 # Minimum measured internet down speed (Mbps) — low-bandwidth hosts struggle to
-# pull the image / join the tailnet. Applied as an API filter.
+# pull the image and move data over the tunnel. Applied as an API filter.
 VAST_MIN_INET_MBPS = float(_env("VAST_MIN_INET_MBPS", "200"))
 # Required host verification tier, matched client-side against each offer's
 # `verification` field ("verified" = datacenter-grade, "unverified" = community,

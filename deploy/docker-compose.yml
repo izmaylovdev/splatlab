@@ -16,10 +16,10 @@
 # runs the workflow and dispatches COLMAP/train activities to the `splat-gpu` task
 # queue; the `pool` autoscaler rents GPU boxes on demand to poll that queue and
 # releases them when idle. A rented box reaches this (laptop-local) control plane
-# over a Tailscale tailnet — so training actually completes from your Mac.
+# over ngrok — so training actually completes from your Mac.
 #
-# The `pool` autoscaler is opt-in — it needs a VAST_API_KEY and a TAILSCALE_AUTHKEY
-# in deploy/.env, plus SPLATLAB_HOST set to your Mac's tailnet IP:
+# The `pool` autoscaler is opt-in — it needs a VAST_API_KEY in deploy/.env, plus
+# the ngrok tunnels up: run `bash deploy/ngrok_up.sh` (writes BOX_* into .env), then
 #   docker compose -f deploy/docker-compose.yml --profile pool up -d
 # Without the pool the stack still runs end-to-end except the GPU steps, which
 # wait in the queue.
@@ -161,10 +161,10 @@ services:
 
   # ---- app: GPU autoscaler (opt-in) ------------------------------------------
   # `docker compose -f deploy/docker-compose.yml --profile pool up -d`.
-  # Needs VAST_API_KEY + TAILSCALE_AUTHKEY, and SPLATLAB_HOST = your Mac's tailnet
-  # IP (`tailscale ip -4`). The pool talks to Temporal/Redis by service name, but
-  # FORWARDS the box-facing BOX_* addresses (the Mac over Tailscale) to each rented
-  # box, so the box dials back in and training completes.
+  # Needs VAST_API_KEY, and the ngrok tunnels up (`bash deploy/ngrok_up.sh`, which
+  # writes BOX_* into deploy/.env). The pool talks to Temporal/Redis by service
+  # name, but FORWARDS the box-facing BOX_* addresses (the Mac's ngrok public
+  # addresses) to each rented box, so the box dials back in and training completes.
   pool:
     build:
       context: ..
@@ -186,13 +186,12 @@ services:
       SPLATLAB_S3_REGION: ${SPLATLAB_S3_REGION:-us-east-1}
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-splatlab}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-splatlab-secret}
-      # Box-facing addresses the pool FORWARDS to each rented box — the Mac reached
-      # over Tailscale (SPLATLAB_HOST = the Mac's tailnet IP). NOT service names.
-      BOX_TEMPORAL_ADDRESS: ${SPLATLAB_HOST:-}:7233
-      BOX_REDIS_URL: redis://:${REDIS_PASSWORD}@${SPLATLAB_HOST:-}:6379
-      BOX_S3_ENDPOINT: http://${SPLATLAB_HOST:-}:9000
-      # Tailscale auth key the box uses to join the tailnet on boot.
-      TS_AUTHKEY: ${TAILSCALE_AUTHKEY:-}
+      # Box-facing addresses the pool FORWARDS to each rented box — the Mac's ngrok
+      # public addresses, written into deploy/.env by `deploy/ngrok_up.sh`. Each is
+      # a distinct random host:port (different tunnel), NOT derivable from one host.
+      BOX_TEMPORAL_ADDRESS: ${BOX_TEMPORAL_ADDRESS:-}
+      BOX_REDIS_URL: ${BOX_REDIS_URL:-}
+      BOX_S3_ENDPOINT: ${BOX_S3_ENDPOINT:-}
       VAST_API_KEY: ${VAST_API_KEY:-}
       VAST_GPU_NAME: ${VAST_GPU_NAME:-}
       VAST_MAX_PRICE: ${VAST_MAX_PRICE:-0.60}

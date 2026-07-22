@@ -142,43 +142,56 @@ bash deploy/run_worker.sh          # or, on a fresh vast.ai box: bash deploy/vas
 bash deploy/run_api.sh             # → http://localhost:8000
 ```
 
-### Automatic GPU rental (Vast.ai pool over Tailscale)
+### Automatic GPU rental (Vast.ai pool over ngrok)
 
 This is the intended flow: develop locally on your Mac, and let the control plane
 **rent a GPU box on demand** for the COLMAP/training steps, then release it when
-idle. The rented box reaches your laptop-local Temporal / Redis / MinIO over a
-**Tailscale** tailnet, so a run started from your Mac actually completes.
+idle. Your Mac sits behind carrier-grade NAT (a "static" IP that isn't routable
+inbound), so the box can't dial in directly — **ngrok** exposes your laptop-local
+Temporal / Redis / MinIO as public TCP addresses the box dials **out** to, so a
+run started from your Mac actually completes.
 
 **One-time setup:**
 
-1. **Tailscale on your Mac** — install the app (`brew install --cask tailscale`,
-   or from tailscale.com) and sign in. Note your Mac's tailnet IP:
+1. **ngrok** — install it and grab your authtoken:
 
    ```bash
-   tailscale ip -4        # e.g. 100.101.102.103
+   brew install ngrok
    ```
 
-2. **An auth key** — Tailscale admin console → *Settings → Keys* → generate a
-   key (reusable + ephemeral recommended, so reaped boxes drop off the tailnet).
+   Sign up at [ngrok.com](https://ngrok.com), copy *Your Authtoken*, and — because
+   TCP tunnels require it — add a card under *Billing* (the free tier stays free:
+   3 endpoints, 1 GB/mo transfer, which covers a small first run).
 
-3. **Fill in `deploy/.env`:**
+2. **Fill in `deploy/.env`:**
 
    ```ini
    VAST_API_KEY=…            # Vast.ai: Account → API
-   SPLATLAB_HOST=100.101.102.103   # your Mac's tailnet IP from step 1
-   TAILSCALE_AUTHKEY=tskey-auth-…  # from step 2
+   NGROK_AUTHTOKEN=…         # ngrok: Your Authtoken
+   REDIS_PASSWORD=…          # any strong random string (Redis is internet-exposed)
    VAST_MAX_PRICE=0.60       # $/hr ceiling per box (optional)
    ```
 
-**Run it** — bring up the stack with the `pool` profile:
+**Run it:**
 
 ```bash
-docker compose -f deploy/docker-compose.yml --profile pool up -d --build
+# 1. control plane
+docker compose -f deploy/docker-compose.yml up -d --build
+# 2. open the tunnels — discovers the ngrok addresses, writes BOX_* into .env
+bash deploy/ngrok_up.sh
+# 3. start the pool (now that BOX_* are set) and flip the kill-switch off
+SPLATLAB_POOL_PAUSED=0 docker compose -f deploy/docker-compose.yml --profile pool up -d pool
 ```
 
 Now start a run from the UI at http://localhost:8000. The pool rents a GPU box,
-the box joins your tailnet and dials back into your Mac, runs COLMAP/training
-(streaming live telemetry to the browser), and is reaped once idle.
+the box dials back into your Mac over ngrok, runs COLMAP/training (streaming live
+telemetry to the browser), and is reaped once idle.
+
+> **Free-tier addresses change** each time ngrok restarts. If you restart ngrok,
+> re-run `deploy/ngrok_up.sh` and `docker compose … up -d pool` to refresh the
+> box-facing addresses. A paid ngrok plan gives static addresses (set once). For
+> real datasets that exceed ngrok's 1 GB/mo, move artifacts to a public bucket
+> (e.g. Cloudflare R2) so only control traffic uses the tunnel.
 
 The **pool** ([`server/vast/pool.py`](server/vast/pool.py)) watches how many
 training workflows need a GPU and keeps the fleet sized to match — renting the
@@ -194,7 +207,7 @@ Key knobs live in [`server/config.py`](server/config.py): `VAST_GPU_NAME`,
 `VAST_IMAGE`, `VAST_REPO_URL`. `SPLATLAB_POOL_PAUSED=1` drains the whole fleet to
 zero. Running from source instead of Docker? Use
 [`deploy/run_pool.sh`](deploy/run_pool.sh) — it takes the same `VAST_*` /
-`TS_AUTHKEY` / `BOX_*` env described in its header.
+`BOX_*` env described in its header.
 
 ## Workflow
 

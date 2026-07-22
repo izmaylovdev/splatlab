@@ -19,8 +19,11 @@ Thumbs.db
 .idea/
 .vscode/
 
-# --- Local Docker env (secrets: VAST_API_KEY, TAILSCALE_AUTHKEY, S3 creds) ---
+# --- Local Docker env (secrets: VAST_API_KEY, NGROK_AUTHTOKEN, S3 creds) ---
 deploy/.env
+# ngrok runtime files (the config holds the authtoken; log is noise)
+deploy/.ngrok.yml
+deploy/ngrok.log
 
 # --- Claude Code ---
 .claude/settings.local.json

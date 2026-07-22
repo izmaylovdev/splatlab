@@ -2,22 +2,21 @@
 # SplatLab — vast.ai (Linux/CUDA) worker bootstrap.
 #
 # Run this ON the vast.ai GPU instance, from the repo root, after the code is on
-# the box (git clone or scp). It joins the Tailscale tailnet (if TS_AUTHKEY is
-# set), creates a venv, installs the server deps + CUDA PyTorch + gsplat, verifies
-# the GPU, and (unless --no-run) starts the Temporal WORKER, which connects out to
-# the control plane (Temporal + Redis, and MinIO/S3 on the s3 backend).
+# the box (git clone or scp). It creates a venv, installs the server deps + CUDA
+# PyTorch + gsplat, verifies the GPU, and (unless --no-run) starts the Temporal
+# WORKER, which connects out to the control plane (Temporal + Redis, and MinIO/S3
+# on the s3 backend).
 #
 #   bash deploy/vast_setup.sh                # set up, verify, then run the worker
 #   bash deploy/vast_setup.sh --no-run       # set up + verify only
 #
 # The worker connects OUT to the control plane. When the control plane is a laptop
-# behind NAT (the default SplatLab flow), the box reaches it over Tailscale: set
-# TS_AUTHKEY and point TEMPORAL_ADDRESS / REDIS_URL / SPLATLAB_S3_ENDPOINT at the
-# Mac's tailnet address. The GPU pool forwards all of these automatically.
+# behind NAT (the default SplatLab flow), the box reaches it over ngrok: the Mac
+# runs deploy/ngrok_up.sh and TEMPORAL_ADDRESS / REDIS_URL / SPLATLAB_S3_ENDPOINT
+# point at the ngrok public addresses. The GPU pool forwards all of these
+# automatically — nothing tunnel-related needs installing on the box.
 #
 # Tunables (env vars):
-#   TS_AUTHKEY        Tailscale auth key — joins the tailnet (unset = skip)
-#   TS_EXTRA_ARGS     extra args passed to `tailscale up`
 #   TEMPORAL_ADDRESS  control-plane Temporal gRPC   (default localhost:7233)
 #   REDIS_URL         control-plane Redis           (default redis://localhost:6379)
 #   SPLATLAB_STORAGE  local | s3                    (default local)
@@ -50,8 +49,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
 # emit_stage <name>: best-effort boot progress to the control-plane Redis. The
-# first one that lands proves the box reached the Mac over the tailnet with the
-# right creds — the visibility we were missing when boxes hung in "booting".
+# first one that lands proves the box reached the Mac over ngrok with the right
+# creds — the visibility we were missing when boxes hung in "booting".
 # No-op until the venv (with redis) is active; failures never abort the boot.
 emit_stage() {
   [ -n "${REDIS_URL:-}" ] || return 0
@@ -87,36 +86,11 @@ if ! command -v python3 >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1 \
     libgl1 libgomp1 libglib2.0-0
 fi
 
-# ---- Tailscale --------------------------------------------------------------
-# Join the tailnet so the worker can dial the (NAT'd, laptop-local) control plane
-# at its stable tailnet address. Skipped when TS_AUTHKEY is unset (e.g. a box on
-# the same network as the control plane, or a public-host deploy).
-if [ -n "${TS_AUTHKEY:-}" ]; then
-  echo "==> Joining Tailscale tailnet"
-  if ! command -v tailscale >/dev/null 2>&1; then
-    curl -fsSL https://tailscale.com/install.sh | sh
-  fi
-  # Vast instances are containers without systemd; run tailscaled ourselves.
-  # The runtime + state dirs don't exist on a fresh box — tailscaled won't create
-  # its socket's parent, so make them first (this was the boot-hang bug).
-  mkdir -p /var/run/tailscale /var/lib/tailscale /dev/net
-  # Ensure the TUN device exists (needs CAP_MKNOD, present on Vast instances).
-  [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200 || true
-  if ! pgrep -x tailscaled >/dev/null 2>&1; then
-    tailscaled --state=/var/lib/tailscale/tailscaled.state \
-               --socket=/var/run/tailscale/tailscaled.sock >/var/log/tailscaled.log 2>&1 &
-  fi
-  # Wait for the daemon socket to come up (fixed sleeps race on a cold box).
-  for _ in $(seq 1 30); do [ -S /var/run/tailscale/tailscaled.sock ] && break; sleep 1; done
-  # Don't let a tailnet failure abort the whole bootstrap silently — surface it.
-  if ! tailscale up --authkey="$TS_AUTHKEY" --hostname="splatlab-${SPLATLAB_BOX_ID:-box}" \
-                    --accept-routes ${TS_EXTRA_ARGS:-}; then
-    echo "!! tailscale up failed — tailscaled log:" >&2
-    tail -n 30 /var/log/tailscaled.log >&2 || true
-    exit 1
-  fi
-  echo "    tailnet IP: $(tailscale ip -4 2>/dev/null || echo '?')"
-fi
+# Connectivity: the box reaches the (NAT'd, laptop-local) control plane over ngrok.
+# There is nothing to set up on the box — TEMPORAL_ADDRESS / REDIS_URL /
+# SPLATLAB_S3_ENDPOINT already point at the ngrok public addresses (forwarded by
+# the pool), and the worker just dials them OUT. The first emit_stage below is the
+# proof the box reached the Mac.
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "!! nvidia-smi not found — this doesn't look like a GPU instance." >&2
@@ -133,7 +107,7 @@ python -m pip install --upgrade pip
 
 echo "==> Installing server requirements"
 pip install -r requirements.txt
-# First Redis contact: if this lands, tailnet + creds + reachability all work.
+# First Redis contact: if this lands, ngrok + creds + reachability all work.
 emit_stage deps-installed
 
 echo "==> Installing CUDA PyTorch ($TORCH_VERSION / $TV_VERSION, $CUDA_TAG)"
