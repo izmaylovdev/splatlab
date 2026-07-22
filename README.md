@@ -91,10 +91,42 @@ Prints what was found: CUDA device, gsplat, pycolmap / colmap CLI.
 
 ## Run
 
-**1. Control plane** (Temporal + Redis; MinIO too if using the S3 backend):
+### Local, all-in-Docker (recommended)
+
+Brings up the **entire control plane** — Temporal (+Postgres), Redis, MinIO
+("dev S3"), the API, and the control worker — in one command:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+cp deploy/.env.example deploy/.env         # tweak creds/tunables if you like
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+Open:
+- **UI** → http://localhost:8000
+- **Temporal UI** → http://localhost:8233
+- **MinIO console** → http://localhost:9001  (`splatlab` / `splatlab-secret`)
+
+The stack runs on the **S3 backend** against the bundled MinIO. **GPU training
+happens on rented Vast.ai boxes, not in this stack**: the control worker runs the
+workflow and dispatches COLMAP/train activities to the `splat-gpu` task queue,
+which auto-rented GPU boxes poll. Turn that on with the `pool` profile below —
+without it, a started run waits in the queue while everything up to that point
+(projects, photo/video upload, the UI, telemetry) works locally. See
+[`deploy/Dockerfile`](deploy/Dockerfile) (control-plane image, no CUDA) and the
+header of [`deploy/docker-compose.yml`](deploy/docker-compose.yml).
+
+Tear down with `docker compose -f deploy/docker-compose.yml down` (add `-v` to
+also wipe the Postgres/Redis/MinIO volumes).
+
+### From source (individual processes)
+
+Prefer running the processes directly (e.g. to attach a real GPU worker)? Bring
+up just the infra, then launch the app processes from your venv:
+
+**1. Infra** (Temporal + Redis + MinIO):
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d postgresql temporal temporal-ui redis minio
 # dev shortcut: `temporal server start-dev` + a local redis instead
 ```
 
@@ -110,15 +142,43 @@ bash deploy/run_worker.sh          # or, on a fresh vast.ai box: bash deploy/vas
 bash deploy/run_api.sh             # → http://localhost:8000
 ```
 
-### Automatic GPU rental (Vast.ai pool)
+### Automatic GPU rental (Vast.ai pool over Tailscale)
 
-Instead of hand-provisioning the worker in step 2, the control plane can rent GPU
-boxes on demand and release them when idle. Run two extra control-plane processes:
+This is the intended flow: develop locally on your Mac, and let the control plane
+**rent a GPU box on demand** for the COLMAP/training steps, then release it when
+idle. The rented box reaches your laptop-local Temporal / Redis / MinIO over a
+**Tailscale** tailnet, so a run started from your Mac actually completes.
+
+**One-time setup:**
+
+1. **Tailscale on your Mac** — install the app (`brew install --cask tailscale`,
+   or from tailscale.com) and sign in. Note your Mac's tailnet IP:
+
+   ```bash
+   tailscale ip -4        # e.g. 100.101.102.103
+   ```
+
+2. **An auth key** — Tailscale admin console → *Settings → Keys* → generate a
+   key (reusable + ephemeral recommended, so reaped boxes drop off the tailnet).
+
+3. **Fill in `deploy/.env`:**
+
+   ```ini
+   VAST_API_KEY=…            # Vast.ai: Account → API
+   SPLATLAB_HOST=100.101.102.103   # your Mac's tailnet IP from step 1
+   TAILSCALE_AUTHKEY=tskey-auth-…  # from step 2
+   VAST_MAX_PRICE=0.60       # $/hr ceiling per box (optional)
+   ```
+
+**Run it** — bring up the stack with the `pool` profile:
 
 ```bash
-bash deploy/run_control.sh                    # workflow orchestrator (no GPU)
-VAST_API_KEY=… bash deploy/run_pool.sh        # autoscaler: rents/reaps vast.ai boxes
+docker compose -f deploy/docker-compose.yml --profile pool up -d --build
 ```
+
+Now start a run from the UI at http://localhost:8000. The pool rents a GPU box,
+the box joins your tailnet and dials back into your Mac, runs COLMAP/training
+(streaming live telemetry to the browser), and is reaped once idle.
 
 The **pool** ([`server/vast/pool.py`](server/vast/pool.py)) watches how many
 training workflows need a GPU and keeps the fleet sized to match — renting the
@@ -129,30 +189,28 @@ box being reaped. Teardown never depends on a single workflow: a crashed box is
 reaped by stale-heartbeat, a leaked instance by the orphan sweep, and every box by
 `SPLATLAB_POOL_MAX_LIFETIME` — so a paid GPU is never left running unmanaged.
 
-Requirements: `SPLATLAB_STORAGE=s3` (boxes share no filesystem with the API), and
-`TEMPORAL_ADDRESS` / `REDIS_URL` / `SPLATLAB_S3_ENDPOINT` set to addresses a remote
-box can reach (public host or a mesh net — **not** `localhost`); the pool forwards
-these onto each box. Key knobs live in [`server/config.py`](server/config.py):
-`VAST_GPU_NAME`, `VAST_MAX_PRICE`, `SPLATLAB_POOL_MAX_BOXES`,
-`SPLATLAB_POOL_IDLE_TIMEOUT`, `VAST_IMAGE`, `VAST_REPO_URL`. `SPLATLAB_POOL_PAUSED=1`
-drains the whole fleet to zero.
-
-Open http://localhost:8000. Storage defaults to the local disk backend
-(`SPLATLAB_STORAGE=local`, API + worker sharing `data/`); set `SPLATLAB_STORAGE=s3`
-with the `SPLATLAB_S3_*` env vars to run the worker on a **remote** GPU box that
-shares artifacts with the API through MinIO/S3. To host the client separately,
-serve `client/` from any static host and edit `client/config.js` to point
-`SPLATLAB_API_BASE` / `SPLATLAB_WS_BASE` at the API's origin.
+Key knobs live in [`server/config.py`](server/config.py): `VAST_GPU_NAME`,
+`VAST_MAX_PRICE`, `SPLATLAB_POOL_MAX_BOXES`, `SPLATLAB_POOL_IDLE_TIMEOUT`,
+`VAST_IMAGE`, `VAST_REPO_URL`. `SPLATLAB_POOL_PAUSED=1` drains the whole fleet to
+zero. Running from source instead of Docker? Use
+[`deploy/run_pool.sh`](deploy/run_pool.sh) — it takes the same `VAST_*` /
+`TS_AUTHKEY` / `BOX_*` env described in its header.
 
 ## Workflow
 
 1. **New project** → give it a name.
 2. **Upload photos** — pick a folder (30–300 photos of a scene/object with good
    overlap; avoid motion blur; keep exposure fixed if possible).
-3. **Start training** — poses are computed first (this can take minutes),
-   then training starts. Watch the live view, loss chart, and the interactive
-   3D viewer (updates every snapshot interval).
-4. **Export** — download the latest `.ply` (standard 3DGS format, opens in
+3. **Run SFM** — COLMAP computes camera poses and a sparse point cloud (this can
+   take minutes). The pipeline runs as two separate steps, so this **releases the
+   GPU** when it finishes rather than rolling straight into training.
+4. **Review the points** — the sparse SfM cloud loads into the 3D viewer (orbit /
+   zoom it), with its point + registered-image counts. If the reconstruction
+   looks wrong (too few points, wrong shape), fix the photos and **Re-run SFM**
+   before spending GPU time on training.
+5. **Train** — once the points look right, start training. Watch the live view,
+   loss chart, and the interactive 3D viewer (updates every snapshot interval).
+6. **Export** — download the latest `.ply` (standard 3DGS format, opens in
    SuperSplat, Polycam viewer, gsplat viewers, etc.).
 
 ## Notes

@@ -63,16 +63,21 @@ async def _open_workflow_count(temporal) -> int:
 
 
 # ---- box bootstrap ----------------------------------------------------------
-# Env vars forwarded from the pool process onto each rented box. Set these on the
-# pool to the values a box reaches the control plane at (public host / mesh net /
-# S3 creds) — NOT localhost, which a remote box can't reach.
+# A rented box reaches the (laptop-local) control plane over a Tailscale tailnet:
+# the box joins the tailnet on boot with TS_AUTHKEY, then dials the Mac at its
+# stable tailnet address. So the addresses forwarded to the box are DIFFERENT
+# from the ones the pool itself uses (the pool talks to Temporal/Redis by their
+# in-compose service names). The box-facing values come from the BOX_* env vars,
+# each falling back to the pool's own setting when it isn't overridden.
+#
+# Env forwarded verbatim (creds + bootstrap tunables — same value for pool & box).
 _FORWARD_ENV = (
-    "TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "REDIS_URL",
-    "SPLATLAB_STORAGE",
-    "SPLATLAB_S3_ENDPOINT", "SPLATLAB_S3_PUBLIC_ENDPOINT",
+    "TEMPORAL_NAMESPACE",
     "SPLATLAB_S3_BUCKET", "SPLATLAB_S3_REGION",
     "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
     "SPLATLAB_S3_ACCESS_KEY", "SPLATLAB_S3_SECRET_KEY",
+    # Tailscale: joins the box to the tailnet so it can reach the Mac.
+    "TS_AUTHKEY", "TS_EXTRA_ARGS",
     # bootstrap tunables consumed by deploy/vast_setup.sh
     "TORCH_VERSION", "TV_VERSION", "CUDA_TAG", "GSPLAT_WHEEL",
 )
@@ -81,12 +86,25 @@ _FORWARD_ENV = (
 def _box_env(box_id: str) -> dict[str, str]:
     import os
     env = {k: os.environ[k] for k in _FORWARD_ENV if os.environ.get(k)}
+
+    # Box-facing addresses: prefer the explicit BOX_* override, else the pool's
+    # own value. In the Docker stack the pool connects via service names but sets
+    # BOX_* to the Mac's tailnet address (see deploy/docker-compose.yml).
+    def _box_addr(box_key: str, own: str) -> str:
+        return os.environ.get(box_key) or own
+
+    env["TEMPORAL_ADDRESS"] = _box_addr("BOX_TEMPORAL_ADDRESS", config.TEMPORAL_ADDRESS)
+    env["REDIS_URL"] = _box_addr("BOX_REDIS_URL", config.REDIS_URL)
+    s3_endpoint = os.environ.get("BOX_S3_ENDPOINT") or os.environ.get("SPLATLAB_S3_ENDPOINT")
+    if s3_endpoint:
+        env["SPLATLAB_S3_ENDPOINT"] = s3_endpoint
+
     # Non-negotiable: the box runs GPU activities only (the control plane owns the
     # workflow), polls the GPU queue, and reports under its box id.
     env["SPLATLAB_WORKER_ROLE"] = "gpu"
     env["SPLATLAB_TASK_QUEUE"] = config.GPU_TASK_QUEUE
     env["SPLATLAB_BOX_ID"] = box_id
-    env.setdefault("SPLATLAB_STORAGE", "s3")  # ephemeral box shares no FS with API
+    env["SPLATLAB_STORAGE"] = "s3"            # ephemeral box shares no FS with API
     env.setdefault("GSPLAT_WHEEL", "1")       # prebuilt wheel: skips the slow CUDA compile on boot
     return env
 

@@ -58,3 +58,34 @@ def export_ply(
 def rgb_to_sh0(rgb: np.ndarray) -> np.ndarray:
     """[0,1] RGB → DC SH coefficient."""
     return (rgb - 0.5) / SH_C0
+
+
+def export_points_ply(path: str, xyz: np.ndarray, rgb: np.ndarray) -> None:
+    """Write a sparse SfM point cloud as a 3DGS ``.ply`` for *review*.
+
+    Each SfM point becomes a tiny, opaque, isotropic Gaussian coloured by its
+    SfM RGB, so the same GaussianSplats3D viewer that shows training snapshots
+    can display the raw reconstruction the user is asked to sign off on. The
+    point size is a small fraction of the scene extent so dense scenes stay
+    crisp and sparse ones stay visible.
+
+    xyz: [N,3] float, rgb: [N,3] uint8 (COLMAP points3D output).
+    """
+    xyz = np.asarray(xyz, dtype=np.float32).reshape(-1, 3)
+    rgb = np.asarray(rgb, dtype=np.float32).reshape(-1, 3) / 255.0
+    n = xyz.shape[0]
+    if n == 0:
+        raise ValueError("no SfM points to export")
+
+    # Point radius: ~0.15% of the bounding-box diagonal (robust to scene scale),
+    # with a tiny floor so a degenerate cloud still renders.
+    diag = float(np.linalg.norm(xyz.max(0) - xyz.min(0)))
+    radius = max(diag * 0.0015, 1e-4)
+
+    scales = np.full((n, 3), radius, dtype=np.float32)
+    quats = np.tile(np.array([1, 0, 0, 0], dtype=np.float32), (n, 1))  # identity
+    opacities = np.full((n,), 0.9, dtype=np.float32)
+    sh0 = rgb_to_sh0(rgb)
+
+    export_ply(path, means=xyz, scales=scales, quats=quats,
+               opacities=opacities, sh0=sh0, shN=None)

@@ -1,24 +1,32 @@
-# SplatLab control plane: Temporal (+ Postgres), Redis, MinIO.
+# SplatLab — full local control plane in Docker.
 #
-# This is everything the API service and the GPU worker depend on. Bring it up
-# on the box that runs the API (the worker connects to these addresses; on a
-# remote GPU worker, expose these ports or tunnel to them).
+#   docker compose -f deploy/docker-compose.yml up -d --build
 #
-#   docker compose -f deploy/docker-compose.yml up -d
+# Brings up EVERYTHING the control plane needs, containerized:
+#   infra   postgres · temporal · temporal-ui · redis · minio (dev S3)
+#   app     api (REST/WS + UI) · control (workflow worker) · pool (opt-in)
 #
-# Then:  Temporal UI http://localhost:8233   MinIO console http://localhost:9001
+# Open:  UI http://localhost:8000   Temporal UI http://localhost:8233
+#        MinIO console http://localhost:9001  (splatlab / splatlab-secret)
 #
-# Dev shortcut: instead of the temporal/postgresql services here you can run
-# `temporal server start-dev` (in-memory, UI on :8233) and only bring up redis +
-# minio from this file.
+# Storage is the S3 backend against the in-compose MinIO ("dev S3"): API and the
+# control worker exchange artifacts through it, matching the deployed split.
 #
-# App processes run from source (not in this compose). On the control plane:
-#   bash deploy/run_api.sh        # HTTP/WS API
-#   bash deploy/run_control.sh    # control worker: runs SplatTrainingWorkflow
-#   VAST_API_KEY=... bash deploy/run_pool.sh   # GPU autoscaler (rents/reaps boxes)
-# GPU boxes are then rented automatically by the pool — no manual worker needed.
-# (A single co-located box can still run everything with `bash deploy/run_worker.sh`,
-# which defaults to SPLATLAB_WORKER_ROLE=both.)
+# GPU training runs on rented Vast.ai boxes, not in this stack. The control worker
+# runs the workflow and dispatches COLMAP/train activities to the `splat-gpu` task
+# queue; the `pool` autoscaler rents GPU boxes on demand to poll that queue and
+# releases them when idle. A rented box reaches this (laptop-local) control plane
+# over a Tailscale tailnet — so training actually completes from your Mac.
+#
+# The `pool` autoscaler is opt-in — it needs a VAST_API_KEY and a TAILSCALE_AUTHKEY
+# in deploy/.env, plus SPLATLAB_HOST set to your Mac's tailnet IP:
+#   docker compose -f deploy/docker-compose.yml --profile pool up -d
+# Without the pool the stack still runs end-to-end except the GPU steps, which
+# wait in the queue.
+#
+# Config/secrets come from deploy/.env (copy deploy/.env.example). Compose reads
+# it automatically because this file lives in deploy/.
+
 services:
   postgresql:
     image: postgres:16
@@ -29,11 +37,17 @@ services:
       - pgdata:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   temporal:
     image: temporalio/auto-setup:1.25.2
     depends_on:
-      - postgresql
+      postgresql:
+        condition: service_healthy
     environment:
       DB: postgres12
       DB_PORT: 5432
@@ -42,6 +56,11 @@ services:
       POSTGRES_SEEDS: postgresql
     ports:
       - "7233:7233"        # gRPC — TEMPORAL_ADDRESS
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--address", "temporal:7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   temporal-ui:
     image: temporalio/ui:2.31.2
@@ -55,23 +74,133 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    # Password-protected: 6379 is exposed on the public static IP.
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in deploy/.env}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}      # lets the healthcheck's redis-cli auth
     volumes:
       - redisdata:/data
     ports:
       - "6379:6379"        # REDIS_URL
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: splatlab
-      MINIO_ROOT_PASSWORD: splatlab-secret
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-splatlab}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-splatlab-secret}
     volumes:
       - miniodata:/data
     ports:
-      - "9000:9000"        # S3 API — SPLATLAB_S3_ENDPOINT
+      - "9000:9000"        # S3 API — internal SPLATLAB_S3_ENDPOINT
       - "9001:9001"        # console
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---- app: control plane -----------------------------------------------------
+  # Shared config for the app containers (same image, different role/command).
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: splatlab-app:local
+    depends_on:
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      SPLATLAB_STORAGE: s3
+      SPLATLAB_S3_BUCKET: ${SPLATLAB_S3_BUCKET:-splatlab}
+      SPLATLAB_S3_ENDPOINT: http://minio:9000          # API ↔ MinIO (in-network)
+      SPLATLAB_S3_PUBLIC_ENDPOINT: ${SPLATLAB_S3_PUBLIC_ENDPOINT:-http://localhost:9000}  # browser presigned GETs
+      SPLATLAB_S3_REGION: ${SPLATLAB_S3_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-splatlab}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-splatlab-secret}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  control:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: splatlab-app:local
+    command: ["python", "-m", "server.worker.main"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      SPLATLAB_WORKER_ROLE: control
+      TEMPORAL_ADDRESS: temporal:7233
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      SPLATLAB_STORAGE: s3
+      SPLATLAB_S3_BUCKET: ${SPLATLAB_S3_BUCKET:-splatlab}
+      SPLATLAB_S3_ENDPOINT: http://minio:9000
+      SPLATLAB_S3_PUBLIC_ENDPOINT: ${SPLATLAB_S3_PUBLIC_ENDPOINT:-http://localhost:9000}
+      SPLATLAB_S3_REGION: ${SPLATLAB_S3_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-splatlab}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-splatlab-secret}
+    restart: unless-stopped
+
+  # ---- app: GPU autoscaler (opt-in) ------------------------------------------
+  # `docker compose -f deploy/docker-compose.yml --profile pool up -d`.
+  # Needs VAST_API_KEY + TAILSCALE_AUTHKEY, and SPLATLAB_HOST = your Mac's tailnet
+  # IP (`tailscale ip -4`). The pool talks to Temporal/Redis by service name, but
+  # FORWARDS the box-facing BOX_* addresses (the Mac over Tailscale) to each rented
+  # box, so the box dials back in and training completes.
+  pool:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: splatlab-app:local
+    profiles: ["pool"]
+    command: ["python", "-m", "server.vast.pool"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # The pool's own control-plane connection (in-compose service names).
+      TEMPORAL_ADDRESS: temporal:7233
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      SPLATLAB_STORAGE: s3
+      SPLATLAB_S3_BUCKET: ${SPLATLAB_S3_BUCKET:-splatlab}
+      SPLATLAB_S3_REGION: ${SPLATLAB_S3_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-splatlab}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-splatlab-secret}
+      # Box-facing addresses the pool FORWARDS to each rented box — the Mac reached
+      # over Tailscale (SPLATLAB_HOST = the Mac's tailnet IP). NOT service names.
+      BOX_TEMPORAL_ADDRESS: ${SPLATLAB_HOST:-}:7233
+      BOX_REDIS_URL: redis://:${REDIS_PASSWORD}@${SPLATLAB_HOST:-}:6379
+      BOX_S3_ENDPOINT: http://${SPLATLAB_HOST:-}:9000
+      # Tailscale auth key the box uses to join the tailnet on boot.
+      TS_AUTHKEY: ${TAILSCALE_AUTHKEY:-}
+      VAST_API_KEY: ${VAST_API_KEY:-}
+      VAST_GPU_NAME: ${VAST_GPU_NAME:-}
+      VAST_MAX_PRICE: ${VAST_MAX_PRICE:-0.60}
+      SPLATLAB_POOL_MAX_BOXES: ${SPLATLAB_POOL_MAX_BOXES:-3}
+      # Kill-switch: 1 = rent nothing / drain to zero. Kept ON until the box can
+      # actually reach this Mac (connectivity set up). Set to 0 to go live.
+      SPLATLAB_POOL_PAUSED: ${SPLATLAB_POOL_PAUSED:-1}
+    restart: unless-stopped
 
 volumes:
   pgdata:

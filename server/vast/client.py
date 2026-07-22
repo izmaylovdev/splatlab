@@ -6,12 +6,15 @@ bearer token (VAST_API_KEY). Everything returns plain dicts/lists straight from
 the API — the pool layer decides policy.
 
 Vast quirks this hides:
-- Offer search is `PUT /bundles/` with a JSON filter under `{"q": {...}}` whose
-  leaf values are `{"<op>": value}` (e.g. `{"gte": 16}`); `order` is a list of
-  `[field, "asc"|"desc"]`.
-- Renting is `PUT /asks/{offer_id}/` and returns `{"success", "new_contract"}`
-  where `new_contract` is the new instance id.
-- List returns `{"instances": [...]}`; a single get returns `{"instances": {...}}`.
+- Offer search is `POST /api/v0/bundles/` with the filter sent FLAT (not wrapped
+  in `{"q": ...}`): leaf values are `{"<op>": value}` (e.g. `{"gte": 16}`), while
+  `type`/`order`/`limit` sit at the top level; `order` is a list of
+  `[field, "asc"|"desc"]`. `gpu_name` is matched spaced ("RTX 5090").
+- Renting is `PUT /api/v0/asks/{offer_id}/` and returns `{"success",
+  "new_contract"}` where `new_contract` is the new instance id.
+- Listing instances is `GET /api/v1/instances/` (the v0 list endpoint is gone),
+  paginated via `next_token`, returning `{"instances": [...]}`. A single get is
+  still `GET /api/v0/instances/{id}/` → `{"instances": {...}}`.
 """
 from __future__ import annotations
 
@@ -32,7 +35,10 @@ class VastClient:
         key = api_key or config.VAST_API_KEY
         if not key:
             raise VastError("VAST_API_KEY is not set")
-        self._base = (base or config.VAST_API_BASE).rstrip("/")
+        self._base = (base or config.VAST_API_BASE).rstrip("/")   # …/api/v0
+        # Host root (…/api/v0 -> https://console.vast.ai) so we can also reach
+        # versioned paths like /api/v1/instances/ that don't share the v0 prefix.
+        self._root = self._base.split("/api/", 1)[0]
         self._client = httpx.AsyncClient(
             timeout=timeout,
             headers={"Authorization": f"Bearer {key}",
@@ -48,11 +54,19 @@ class VastClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    def _url(self, path: str) -> str:
+        # An explicit /api/vN/... path is versioned — hang it off the host root;
+        # everything else is a v0 subpath under the configured base.
+        if path.startswith("/api/"):
+            return f"{self._root}{path}"
+        return f"{self._base}/{path.lstrip('/')}"
+
     async def _request(self, method: str, path: str,
-                       json: dict | None = None) -> dict[str, Any]:
-        url = f"{self._base}/{path.lstrip('/')}"
+                       json: dict | None = None,
+                       params: dict | None = None) -> dict[str, Any]:
+        url = self._url(path)
         try:
-            resp = await self._client.request(method, url, json=json)
+            resp = await self._client.request(method, url, json=json, params=params)
         except httpx.HTTPError as e:
             raise VastError(f"{method} {path}: {e}") from e
         if resp.status_code >= 400:
@@ -91,7 +105,9 @@ class VastClient:
             q["reliability2"] = {"gte": min_reliability}
         if max_price:
             q["dph_total"] = {"lte": max_price}
-        body = await self._request("PUT", "/bundles/", json={"q": q})
+        # POST with the filter sent FLAT (the old `PUT /bundles/` with {"q": ...}
+        # now 404s).
+        body = await self._request("POST", "/bundles/", json=q)
         return body.get("offers", []) if isinstance(body, dict) else []
 
     # ---- instances ----------------------------------------------------------
@@ -119,9 +135,23 @@ class VastClient:
         return int(new_id)
 
     async def list_instances(self) -> list[dict[str, Any]]:
-        body = await self._request("GET", "/instances/")
-        insts = body.get("instances", []) if isinstance(body, dict) else []
-        return insts if isinstance(insts, list) else []
+        # The v0 list endpoint is deprecated (HTTP 410); page through v1.
+        out: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            params: dict[str, Any] = {"limit": 100}
+            if after:
+                params["after_token"] = after
+            body = await self._request("GET", "/api/v1/instances/", params=params)
+            if not isinstance(body, dict):
+                break
+            page = body.get("instances") or []
+            if isinstance(page, list):
+                out.extend(page)
+            after = body.get("next_token")
+            if not after or not page:
+                break
+        return out
 
     async def get_instance(self, instance_id: int) -> dict[str, Any] | None:
         body = await self._request("GET", f"/instances/{instance_id}/")

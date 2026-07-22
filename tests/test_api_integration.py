@@ -42,9 +42,23 @@ def test_api_crud_and_files():
     assert r == {"saved": 2, "skipped": 1, "total": 2}, r
     assert c.get(f"/api/projects/{pid}").json()["num_photos"] == 2
 
-    # train guard: fewer than 3 photos → 409 (no Temporal needed to reject)
+    # sfm guard: fewer than 3 photos → 409 (no Temporal needed to reject)
+    sr = c.post(f"/api/projects/{pid}/sfm", json={})
+    assert sr.status_code == 409, (sr.status_code, sr.text)
+    # train guard: no SFM points yet → 409, regardless of photo count
     tr = c.post(f"/api/projects/{pid}/train", json={})
     assert tr.status_code == 409, (tr.status_code, tr.text)
+
+    # once SFM points exist, the project reports poses_ready (artifact-driven)
+    from server.shared.constants import SFM_POINTS_REL
+    from server.shared.storage import get_storage as _gs
+    pts = os.path.join(_gs().project_dir(pid), SFM_POINTS_REL)
+    os.makedirs(os.path.dirname(pts), exist_ok=True)
+    with open(pts, "wb") as f:
+        f.write(b"PLY-POINTS")
+    pv = c.get(f"/api/projects/{pid}").json()
+    assert pv["poses_ready"] and pv["status"] == "poses_ready", pv
+    assert pv["sfm_points"] == f"/files/{pid}/{SFM_POINTS_REL}", pv
 
     # fake a snapshot artifact and fetch it through /files + export
     from server.shared.storage import get_storage

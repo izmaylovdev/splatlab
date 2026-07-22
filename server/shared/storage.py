@@ -85,6 +85,15 @@ class Storage:
         """A local filesystem path the API can FileResponse, or None (remote)."""
         ...
 
+    def artifact_exists(self, pid: str, rel: str) -> bool:
+        """True if the artifact at ``rel`` exists in the store. Used by the API to
+        infer pipeline state (e.g. SFM points ready) without a live workflow."""
+        ...
+
+    def read_json(self, pid: str, rel: str) -> dict[str, Any] | None:
+        """Read a small JSON sidecar artifact (e.g. sfm.json), or None."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 class LocalDiskStorage(Storage):
@@ -175,6 +184,16 @@ class LocalDiskStorage(Storage):
         if not full.startswith(root + os.sep):
             return None
         return full if os.path.isfile(full) else None
+
+    def artifact_exists(self, pid: str, rel: str) -> bool:
+        return os.path.isfile(os.path.join(self._pdir(pid), rel))
+
+    def read_json(self, pid: str, rel: str) -> dict[str, Any] | None:
+        try:
+            with open(os.path.join(self._pdir(pid), rel)) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +354,20 @@ class S3Storage(Storage):
 
     def local_artifact_path(self, pid: str, rel: str) -> str | None:
         return None  # browser loads presigned URLs directly
+
+    def artifact_exists(self, pid: str, rel: str) -> bool:
+        try:
+            self._client.head_object(Bucket=self.bucket, Key=self._key(pid, rel))
+            return True
+        except Exception:
+            return False
+
+    def read_json(self, pid: str, rel: str) -> dict[str, Any] | None:
+        try:
+            resp = self._client.get_object(Bucket=self.bucket, Key=self._key(pid, rel))
+            return json.loads(resp["Body"].read())
+        except Exception:
+            return None
 
 
 _storage: Storage | None = None

@@ -69,8 +69,9 @@ def workflow_id(project_id: str) -> str:
 VAST_API_KEY = os.environ.get("VAST_API_KEY") or None
 VAST_API_BASE = _env("VAST_API_BASE", "https://console.vast.ai/api/v0")
 
-# Offer search filters. VAST_GPU_NAME uses Vast's underscored form (e.g.
-# "RTX_4090"); empty = any GPU meeting the other bars.
+# Offer search filters. VAST_GPU_NAME is matched against the API's raw gpu_name,
+# which is SPACED (e.g. "RTX 5090", "RTX 4090" — not "RTX_5090"); empty = any GPU
+# meeting the other bars.
 VAST_GPU_NAME = os.environ.get("VAST_GPU_NAME") or ""
 VAST_MIN_GPU_RAM_GB = float(_env("VAST_MIN_GPU_RAM_GB", "16"))
 VAST_MIN_RELIABILITY = float(_env("VAST_MIN_RELIABILITY", "0.98"))

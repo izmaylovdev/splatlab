@@ -2,20 +2,22 @@
 # SplatLab — vast.ai (Linux/CUDA) worker bootstrap.
 #
 # Run this ON the vast.ai GPU instance, from the repo root, after the code is on
-# the box (git clone or scp). It creates a venv, installs the server deps + CUDA
-# PyTorch + gsplat, verifies the GPU, and (unless --no-run) starts the Temporal
-# WORKER, which connects out to the control plane (Temporal + Redis, and MinIO/S3
-# on the s3 backend).
+# the box (git clone or scp). It joins the Tailscale tailnet (if TS_AUTHKEY is
+# set), creates a venv, installs the server deps + CUDA PyTorch + gsplat, verifies
+# the GPU, and (unless --no-run) starts the Temporal WORKER, which connects out to
+# the control plane (Temporal + Redis, and MinIO/S3 on the s3 backend).
 #
 #   bash deploy/vast_setup.sh                # set up, verify, then run the worker
 #   bash deploy/vast_setup.sh --no-run       # set up + verify only
 #
-# The worker connects OUT — point it at your control plane and reach those from
-# the box directly or via SSH reverse tunnels, e.g.:
-#   ssh -p <SSH_PORT> -N -R 7233:localhost:7233 -R 6379:localhost:6379 root@<HOST>
-# then run with TEMPORAL_ADDRESS=localhost:7233 REDIS_URL=redis://localhost:6379.
+# The worker connects OUT to the control plane. When the control plane is a laptop
+# behind NAT (the default SplatLab flow), the box reaches it over Tailscale: set
+# TS_AUTHKEY and point TEMPORAL_ADDRESS / REDIS_URL / SPLATLAB_S3_ENDPOINT at the
+# Mac's tailnet address. The GPU pool forwards all of these automatically.
 #
 # Tunables (env vars):
+#   TS_AUTHKEY        Tailscale auth key — joins the tailnet (unset = skip)
+#   TS_EXTRA_ARGS     extra args passed to `tailscale up`
 #   TEMPORAL_ADDRESS  control-plane Temporal gRPC   (default localhost:7233)
 #   REDIS_URL         control-plane Redis           (default redis://localhost:6379)
 #   SPLATLAB_STORAGE  local | s3                    (default local)
@@ -48,6 +50,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
 echo "==> SplatLab vast.ai bootstrap  (torch $TORCH_VERSION+$CUDA_TAG, port $PORT)"
+
+# ---- Tailscale --------------------------------------------------------------
+# Join the tailnet so the worker can dial the (NAT'd, laptop-local) control plane
+# at its stable tailnet address. Skipped when TS_AUTHKEY is unset (e.g. a box on
+# the same network as the control plane, or a public-host deploy).
+if [ -n "${TS_AUTHKEY:-}" ]; then
+  echo "==> Joining Tailscale tailnet"
+  if ! command -v tailscale >/dev/null 2>&1; then
+    curl -fsSL https://tailscale.com/install.sh | sh
+  fi
+  # Vast instances are containers without systemd; run tailscaled ourselves.
+  # Ensure the TUN device exists (needs CAP_MKNOD, present on Vast instances).
+  if [ ! -c /dev/net/tun ]; then
+    mkdir -p /dev/net && mknod /dev/net/tun c 10 200 || true
+  fi
+  if ! pgrep -x tailscaled >/dev/null 2>&1; then
+    tailscaled --state=/var/lib/tailscale/tailscaled.state \
+               --socket=/var/run/tailscale/tailscaled.sock >/var/log/tailscaled.log 2>&1 &
+    sleep 2
+  fi
+  tailscale up --authkey="$TS_AUTHKEY" --hostname="splatlab-${SPLATLAB_BOX_ID:-box}" \
+               --accept-routes ${TS_EXTRA_ARGS:-}
+  echo "    tailnet IP: $(tailscale ip -4 2>/dev/null || echo '?')"
+fi
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "!! nvidia-smi not found — this doesn't look like a GPU instance." >&2

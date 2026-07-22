@@ -12,6 +12,11 @@ from temporalio.client import Client, WorkflowHandle
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.service import RPCError, RPCStatusCode
 
+try:  # moved from temporalio.client to temporalio.exceptions in newer SDKs
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+except ImportError:  # pragma: no cover - older temporalio
+    from temporalio.client import WorkflowAlreadyStartedError  # type: ignore
+
 from .. import config
 from ..workflows.types import TrainParams
 
@@ -36,20 +41,22 @@ class AlreadyRunning(Exception):
     """A training workflow for this project is already running."""
 
 
-async def start_training(pid: str, cfg: dict[str, Any], run_id: str) -> None:
-    from temporalio.client import WorkflowAlreadyStartedError
+async def start_run(pid: str, cfg: dict[str, Any], run_id: str, phase: str) -> None:
+    """Start one pipeline phase ("sfm" or "train") for a project.
 
+    Both phases share the per-project workflow id, so the FAIL conflict policy
+    rejects a second *concurrent* run while allowing the next phase to reuse the
+    id once the previous one has completed (sfm completes -> train can start).
+    """
     client = await get_client()
     try:
         await client.start_workflow(
             WORKFLOW_TYPE,
-            TrainParams(project_id=pid, config=cfg, run_id=run_id),
+            TrainParams(project_id=pid, config=cfg, run_id=run_id, phase=phase),
             id=config.workflow_id(pid),
             # Workflow runs on the always-on control plane; it dispatches the
             # GPU activities to the pool-managed GPU queue itself.
             task_queue=config.CONTROL_TASK_QUEUE,
-            # Reject a second concurrent run for the same project; allow a fresh
-            # run once the previous one has closed.
             id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
         )
     except WorkflowAlreadyStartedError as e:

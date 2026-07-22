@@ -1,8 +1,9 @@
 """Run SplatTrainingWorkflow in Temporal's test env with stub activities.
 
 Validates: workflow imports pass the sandbox, activity wiring/args, the `state`
-query at each stage, a normal completion, and a `stop` signal cancelling the
-running activity -> 'stopped'. No GPU/Redis/COLMAP involved.
+query at each stage, both phases (sfm -> poses_ready, then train -> done), and a
+`stop` signal cancelling the running training activity -> 'stopped'. No
+GPU/Redis/COLMAP involved.
 """
 import asyncio
 
@@ -18,7 +19,10 @@ from server.config import TASK_QUEUE, workflow_id
 
 @activity.defn(name="run_colmap_activity")
 async def stub_colmap(a: ColmapArgs) -> ColmapResult:
-    return ColmapResult(undistorted_rel=f"colmap/undistorted")
+    return ColmapResult(undistorted_rel="colmap/undistorted",
+                        points_rel="colmap/points.ply",
+                        points_uri="/files/x/colmap/points.ply",
+                        num_points=1234, num_images=12)
 
 
 @activity.defn(name="train_activity")
@@ -45,14 +49,25 @@ async def happy_path(client: Client):
                       workflows=[SplatTrainingWorkflow],
                       activities=[stub_colmap, stub_train]):
         from server.workflows.types import TrainParams
+        # Phase 1: SFM completes at poses_ready (GPU released for review).
         h = await client.start_workflow(
             SplatTrainingWorkflow.run,
-            TrainParams(project_id="p1", config={"colmap_matcher": "auto"}, run_id="r1"),
+            TrainParams(project_id="p1", config={"colmap_matcher": "auto"},
+                        run_id="r1", phase="sfm"),
+            id=workflow_id("p1"), task_queue=TASK_QUEUE)
+        sfm = await h.result()
+        assert sfm["status"] == "poses_ready", sfm
+        assert sfm["num_points"] == 1234 and sfm["num_images"] == 12, sfm
+
+        # Phase 2: same workflow id is reusable once the sfm run has closed.
+        h = await client.start_workflow(
+            SplatTrainingWorkflow.run,
+            TrainParams(project_id="p1", config={}, run_id="r1b", phase="train"),
             id=workflow_id("p1"), task_queue=TASK_QUEUE)
         result = await h.result()
         assert result["status"] == "done", result
         assert result["final_step"] == 1500, result
-        print("happy path:", result)
+        print("happy path:", sfm, result)
 
 
 async def stop_path(client: Client):
@@ -65,7 +80,7 @@ async def stop_path(client: Client):
         from server.workflows.types import TrainParams
         h = await client.start_workflow(
             SplatTrainingWorkflow.run,
-            TrainParams(project_id="p2", config={}, run_id="r2"),
+            TrainParams(project_id="p2", config={}, run_id="r2", phase="train"),
             id=workflow_id("p2"), task_queue=TASK_QUEUE)
         # wait until it reaches the training stage, then stop
         for _ in range(50):

@@ -19,6 +19,9 @@ Thumbs.db
 .idea/
 .vscode/
 
+# --- Local Docker env (secrets: VAST_API_KEY, TAILSCALE_AUTHKEY, S3 creds) ---
+deploy/.env
+
 # --- Claude Code ---
 .claude/settings.local.json
 

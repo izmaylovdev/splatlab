@@ -1,0 +1,27 @@
+# Control-plane dependency set — API service, control worker, and GPU pool.
+#
+# Deliberately a SUBSET of the repo's requirements.txt: it omits the GPU-box-only
+# deps (torch, gsplat, pycolmap), which are used exclusively by the COLMAP/train
+# activities that run on a real GPU worker — never by the control plane. This
+# keeps the control-plane image small and arch-portable (e.g. arm64 dev Macs,
+# where no pycolmap wheel exists).
+
+# API service
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pillow>=10.0
+numpy>=1.26
+
+# Durable orchestration + live telemetry bus
+temporalio>=1.7
+redis>=5.0
+
+# Vast.ai GPU autoscaler (server/vast) — async HTTP client
+httpx>=0.27
+
+# Object storage bridge (S3 backend)
+boto3>=1.34
+
+# Bundled ffmpeg for the API's /video frame extraction
+imageio-ffmpeg>=0.5

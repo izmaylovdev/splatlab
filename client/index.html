@@ -66,6 +66,7 @@
   }
   .badge.training { color: var(--accent2); border-color: var(--accent2); }
   .badge.poses { color: var(--warn); border-color: var(--warn); }
+  .badge.ready { color: var(--accent); border-color: var(--accent); }
   .badge.error { color: var(--danger); border-color: var(--danger); }
   #stageDetail { font-size: 12px; color: var(--muted); max-width: 340px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -152,7 +153,8 @@
       <span class="badge" id="pStatus">new</span>
       <span id="stageDetail"></span>
       <span class="spacer"></span>
-      <button id="btnTrain" class="primary">▶ Start training</button>
+      <button id="btnSfm" class="primary">① Run SFM</button>
+      <button id="btnTrain">② Train</button>
       <button id="btnStop" style="display:none">■ Stop</button>
       <button id="btnExport">Export .ply</button>
       <button id="btnDelete" class="danger">Delete</button>
@@ -380,8 +382,9 @@ let viewer = null;
 let viewerLoading = false;
 let savedCam = null;
 
-async function loadSnapshot(url) {
+async function loadSnapshot(url, tag) {
   lastSnapshotUrl = url;
+  loadSnapshot._tag = tag;
   if (!(await ensureViewerLib())) return;
   if (viewerLoading) { pendingSnapshotUrl = url; return; }
   viewerLoading = true;
@@ -414,7 +417,8 @@ async function loadSnapshot(url) {
       splatAlphaRemovalThreshold: 5,
     });
     viewer.start();
-    $('viewerTag').textContent = '3D viewer — ' + decodeURIComponent(url.split('/').pop());
+    $('viewerTag').textContent = loadSnapshot._tag ||
+      ('3D viewer — ' + decodeURIComponent(url.split('/').pop().split('?')[0]));
   } catch (e) {
     console.error('viewer load failed', e);
     $('viewerOverlay').style.display = 'flex';
@@ -448,16 +452,39 @@ async function refreshProjects(selectId) {
   if (selectId) selectProject(selectId);
 }
 
-function setStatusBadge(status) {
+// Drive the two-step controls + status badge off the current status and whether
+// SFM poses are ready (persisted on `current`). SFM and training are distinct
+// steps: run SFM → review the extracted points → train.
+function updateControls(status) {
   const b = $('pStatus');
-  b.textContent = status;
+  b.textContent = status === 'poses_ready' ? 'poses ready' : status;
   b.className = 'badge' +
     (status === 'training' ? ' training'
-      : status === 'processing_poses' ? ' poses'
+      : status === 'processing_poses' || status === 'queued' ? ' poses'
+      : status === 'poses_ready' ? ' ready'
       : status === 'error' ? ' error' : '');
-  const running = status === 'training' || status === 'processing_poses';
-  $('btnTrain').style.display = running ? 'none' : '';
+
+  const running = status === 'queued' || status === 'processing_poses' || status === 'training';
+  const trained = !!(current && current.snapshots && current.snapshots.length) || status === 'done';
+  const posesReady = !!(current && current.poses_ready) || status === 'poses_ready' || trained;
+
   $('btnStop').style.display = running ? '' : 'none';
+  $('btnSfm').style.display = running ? 'none' : '';
+  $('btnTrain').style.display = running ? 'none' : '';
+
+  // Before poses exist, SFM is the primary action; after, training is.
+  $('btnSfm').textContent = posesReady ? '↻ Re-run SFM' : '① Run SFM';
+  $('btnSfm').classList.toggle('primary', !posesReady);
+  $('btnTrain').textContent = trained ? '② Re-train' : '② Train';
+  $('btnTrain').disabled = !posesReady;
+  $('btnTrain').classList.toggle('primary', posesReady);
+}
+
+function showViewerOverlay(text) {
+  const ov = $('viewerOverlay');
+  ov.style.display = 'flex';
+  ov.textContent = text;
+  $('viewerTag').textContent = '3D viewer';
 }
 
 async function selectProject(pid) {
@@ -467,7 +494,7 @@ async function selectProject(pid) {
   $('proj').style.display = 'flex';
   $('pName').textContent = p.name;
   $('stageDetail').textContent = p.error || '';
-  setStatusBadge(p.status);
+  updateControls(p.status);
   updatePhotoStat(p.num_photos);
   const c = p.config;
   $('cfgSteps').value = c.max_steps;
@@ -510,19 +537,29 @@ function handleEvent(m) {
   switch (m.type) {
     case 'hello': {
       const p = m.project;
-      setStatusBadge(p.status);
+      // Carry the durable poses/snapshot facts onto `current` so the controls
+      // reflect them across reconnects.
+      if (current) { current.poses_ready = p.poses_ready; current.sfm_points = p.sfm_points;
+                     current.snapshots = p.snapshots; }
+      updateControls(p.status);
       if (p.stage) $('stageDetail').textContent = `${p.stage.stage}: ${p.stage.detail}`;
       for (const h of m.history) pushProgress(h, true);
       scheduleCharts();
-      if (m.latest_snapshot) loadSnapshot(m.latest_snapshot);
+      // Viewer shows the training result if any, else the SFM points to review.
+      if (p.latest_snapshot) loadSnapshot(p.latest_snapshot);
+      else if (p.sfm_points && p.status === 'poses_ready')
+        loadSnapshot(p.sfm_points, 'SFM points — review, then Train');
+      else showViewerOverlay(p.num_photos
+        ? 'Run SFM to extract camera poses, then review the points here'
+        : 'Upload photos to begin');
       break;
     }
     case 'status':
       $('stageDetail').textContent = `${m.stage}: ${m.detail || ''}`;
-      if (['features', 'matching', 'mapping', 'undistort'].includes(m.stage)) {
-        setStatusBadge('processing_poses');
+      if (['features', 'matching', 'mapping', 'undistort', 'review'].includes(m.stage)) {
+        updateControls('processing_poses');
       } else if (['init', 'training'].includes(m.stage)) {
-        setStatusBadge('training');
+        updateControls('training');
       }
       break;
     case 'progress':
@@ -531,18 +568,28 @@ function handleEvent(m) {
     case 'frame':
       $('liveImg').src = 'data:image/jpeg;base64,' + m.jpeg_b64;
       break;
+    case 'sfm':                       // SFM finished — poses ready to review
+      if (current) { current.poses_ready = true; current.sfm_points = m.url; }
+      updateControls('poses_ready');
+      $('stageDetail').textContent =
+        `${(m.num_points || 0).toLocaleString()} points · ${m.num_images || 0} images`;
+      loadSnapshot(m.url, 'SFM points — review, then Train');
+      toast('SFM done — review the points, then click Train');
+      refreshProjects();
+      break;
     case 'snapshot':
       loadSnapshot(m.url);
       break;
     case 'done':
-      setStatusBadge('done');
+      if (current) current.snapshots = (current.snapshots || []).concat(m.url ? [m.url] : []);
+      updateControls('done');
       $('stageDetail').textContent = `finished at step ${m.step}`;
       if (m.url) loadSnapshot(m.url);
       toast('Training finished 🎉');
       refreshProjects();
       break;
     case 'error':
-      setStatusBadge('error');
+      updateControls('error');
       $('stageDetail').textContent = m.message;
       toast(m.message, true);
       refreshProjects();
@@ -585,11 +632,13 @@ function setUploadBar(frac, indeterminate) {
 }
 function setUploadBusy(busy) {
   uploading = busy;
-  for (const id of ['btnFiles', 'btnVideo', 'btnClearPhotos', 'btnTrain']) $(id).disabled = busy;
+  for (const id of ['btnFiles', 'btnVideo', 'btnClearPhotos', 'btnSfm', 'btnTrain']) $(id).disabled = busy;
   $('drop').style.pointerEvents = busy ? 'none' : '';
   if (!busy) {
     $('uploadBar').classList.remove('show', 'indeterminate');
     $('uploadBarFill').style.width = '0%';
+    // Re-apply real button state (e.g. keep Train disabled until poses exist).
+    if (current) updateControls(current.status);
   }
 }
 
@@ -732,8 +781,8 @@ $('btnClearPhotos').onclick = async () => {
 };
 
 // ---------------------------------------------------------------- controls
-$('btnTrain').onclick = async () => {
-  const config = {
+function readConfig() {
+  return {
     max_steps: +$('cfgSteps').value,
     snapshot_every: +$('cfgSnap').value,
     frame_every: +$('cfgFrame').value,
@@ -741,14 +790,28 @@ $('btnTrain').onclick = async () => {
     max_image_side: +$('cfgSide').value,
     colmap_matcher: $('cfgMatcher').value,
   };
+}
+// Step 1: extract camera poses + a reviewable sparse point cloud.
+$('btnSfm').onclick = async () => {
+  try {
+    await api(`/api/projects/${current.id}/sfm`, {
+      method: 'POST', body: JSON.stringify({ config: readConfig() }),
+    });
+    updateControls('processing_poses');
+    $('stageDetail').textContent = 'starting COLMAP…';
+    toast('Running SFM — extracting camera poses…');
+  } catch (e) { toast(e.message, true); }
+};
+// Step 2: train the splat (only once poses have been reviewed).
+$('btnTrain').onclick = async () => {
   lossPts = []; psnrPts = [];
   scheduleCharts();
   try {
     await api(`/api/projects/${current.id}/train`, {
-      method: 'POST', body: JSON.stringify({ config }),
+      method: 'POST', body: JSON.stringify({ config: readConfig() }),
     });
-    setStatusBadge('processing_poses');
-    toast(mockMode ? 'Mock training started' : 'Computing camera poses, then training…');
+    updateControls('training');
+    toast('Training started…');
   } catch (e) { toast(e.message, true); }
 };
 $('btnStop').onclick = async () => {

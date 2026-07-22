@@ -21,7 +21,8 @@ from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
 from fastapi.staticfiles import StaticFiles
 
 from .. import config
-from ..shared.constants import IMAGE_EXTS, VIDEO_EXTS
+from ..shared.constants import (IMAGE_EXTS, SFM_META_REL, SFM_POINTS_REL,
+                               VIDEO_EXTS)
 from ..shared.storage import get_storage
 from . import meta as metamod
 from . import temporal_client as tc
@@ -51,10 +52,24 @@ def _meta_or_404(pid: str) -> dict:
 async def _view(pid: str, meta: dict | None = None) -> dict:
     meta = meta or _meta_or_404(pid)
     live = await tc.query_state(pid)
-    status = live["status"] if live else meta.get("status", "new")
+    snaps = storage.list_snapshots(pid)
+
+    # Poses-ready is a durable, stateless fact: the reviewable SfM point cloud
+    # exists in storage. It survives the SFM workflow completing / history GC.
+    poses_ready = storage.artifact_exists(pid, SFM_POINTS_REL)
+    sfm_points = storage.public_url(pid, SFM_POINTS_REL) if poses_ready else None
+    sfm_meta = storage.read_json(pid, SFM_META_REL) or {}
+    sfm_live = (live or {}).get("sfm") or {}
+    num_points = int(sfm_live.get("num_points") or sfm_meta.get("num_points") or 0)
+    num_images = int(sfm_live.get("num_images") or sfm_meta.get("num_images") or 0)
+
+    # Live workflow status wins when a run is open (or queryable); otherwise infer
+    # from artifacts: trained (snapshots) > poses-ready (points) > stored meta.
+    resting = ("done" if snaps else "poses_ready" if poses_ready
+               else meta.get("status", "new"))
+    status = live["status"] if live else resting
     stage = live["stage"] if live else None
     cfg = (live.get("config") if live and live.get("config") else meta.get("config", {}))
-    snaps = storage.list_snapshots(pid)
     return {
         "id": pid,
         "name": meta.get("name", ""),
@@ -64,6 +79,10 @@ async def _view(pid: str, meta: dict | None = None) -> dict:
         "stage": stage,
         "num_photos": storage.num_photos(pid),
         "config": cfg,
+        "poses_ready": poses_ready,
+        "sfm_points": sfm_points,
+        "num_points": num_points,
+        "num_images": num_images,
         "latest_snapshot": storage.public_url(pid, snaps[-1]) if snaps else None,
         "snapshots": [storage.public_url(pid, s) for s in snaps],
     }
@@ -178,20 +197,36 @@ async def clear_photos(pid: str):
     return {"ok": True}
 
 
-# ---- training control -------------------------------------------------------
-@app.post("/api/projects/{pid}/train")
-async def start_training(pid: str, body: dict | None = None):
+# ---- pipeline control (two phases: SFM, then training) ----------------------
+async def _start_phase(pid: str, body: dict | None, phase: str) -> None:
     meta = _meta_or_404(pid)
-    if storage.num_photos(pid) < 3:
-        raise HTTPException(409, "Upload at least 3 photos first")
     cfg = metamod.merge_config(meta, (body or {}).get("config"))
     meta["config"] = cfg
     storage.write_meta(pid, meta)
     try:
-        await tc.start_training(pid, cfg, run_id=uuid.uuid4().hex)
+        await tc.start_run(pid, cfg, run_id=uuid.uuid4().hex, phase=phase)
     except tc.AlreadyRunning as e:
-        raise HTTPException(409, "Training already running for this project") from e
-    return await _view(pid, meta)
+        raise HTTPException(409, "A run is already in progress for this project") from e
+
+
+@app.post("/api/projects/{pid}/sfm")
+async def start_sfm(pid: str, body: dict | None = None):
+    """Phase 1: run COLMAP to extract camera poses + the reviewable point cloud."""
+    _meta_or_404(pid)
+    if storage.num_photos(pid) < 3:
+        raise HTTPException(409, "Upload at least 3 photos first")
+    await _start_phase(pid, body, phase="sfm")
+    return await _view(pid)
+
+
+@app.post("/api/projects/{pid}/train")
+async def start_training(pid: str, body: dict | None = None):
+    """Phase 2: train the splat. Requires the SFM points to exist (reviewed)."""
+    _meta_or_404(pid)
+    if not storage.artifact_exists(pid, SFM_POINTS_REL):
+        raise HTTPException(409, "Run SFM first, then review the points")
+    await _start_phase(pid, body, phase="train")
+    return await _view(pid)
 
 
 @app.post("/api/projects/{pid}/stop")

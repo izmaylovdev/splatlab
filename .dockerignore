@@ -1,0 +1,39 @@
+# Build context is the repo root (deploy/docker-compose.yml uses context: ..).
+# Keep the image small and cache-friendly by excluding everything the control
+# plane doesn't need to run.
+.git
+.gitignore
+.venv
+venv
+env
+__pycache__
+**/__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+
+# Runtime / generated data — never bake into the image.
+/data
+*.pt
+*.ply
+local_server*.log
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+
+# Docs / tests aren't needed at runtime.
+tests
+README.md
+
+# The deploy dir: scripts, compose, and env aren't copied into the image
+# (deploy/requirements-controlplane.txt IS needed, so exclude selectively).
+deploy/*.sh
+deploy/.env
+deploy/.env.example
+deploy/docker-compose.yml
+deploy/Dockerfile
+deploy/vast_setup.sh
+.claude
