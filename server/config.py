@@ -82,7 +82,7 @@ VAST_DISK_GB = int(_env("VAST_DISK_GB", "40"))
 # the rest on first boot. Override with a prebaked image to cut cold start.
 VAST_IMAGE = _env("VAST_IMAGE", "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime")
 # Repo the onstart script clones onto a fresh box (branch optional).
-VAST_REPO_URL = _env("VAST_REPO_URL", "https://github.com/izamylovdev/splatlab.git")
+VAST_REPO_URL = _env("VAST_REPO_URL", "https://github.com/izmaylovdev/splatlab.git")
 VAST_REPO_BRANCH = _env("VAST_REPO_BRANCH", "main")
 # Label stamped on every instance we create — the pool only ever touches boxes
 # carrying this label, so it can never destroy someone else's instance.
