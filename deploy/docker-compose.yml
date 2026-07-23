@@ -196,6 +196,10 @@ services:
       VAST_GPU_NAME: ${VAST_GPU_NAME:-}
       VAST_MAX_PRICE: ${VAST_MAX_PRICE:-0.60}
       SPLATLAB_POOL_MAX_BOXES: ${SPLATLAB_POOL_MAX_BOXES:-3}
+      # Boot deadline must cover the on-box torch/gsplat download, which is slow on
+      # some hosts (~800MB torch at ~0.5MB/s ≈ 25min). Default generous; a prebaked
+      # image would let this drop back down.
+      SPLATLAB_POOL_BOOT_DEADLINE: ${SPLATLAB_POOL_BOOT_DEADLINE:-1200}
       # Kill-switch: 1 = rent nothing / drain to zero. Kept ON until the box can
       # actually reach this Mac (connectivity set up). Set to 0 to go live.
       SPLATLAB_POOL_PAUSED: ${SPLATLAB_POOL_PAUSED:-1}

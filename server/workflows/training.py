@@ -49,7 +49,13 @@ _GPU_QUEUE = config.GPU_TASK_QUEUE
 # reconcile cycle plus cold-boot time to bring one online. Give the activity a
 # generous schedule-to-start window so it waits in the queue for a box instead of
 # failing; start-to-close still bounds the actual run once a box picks it up.
-_SCHEDULE_TO_START = timedelta(minutes=30)
+#
+# Cold boot on a fresh box today = image pull (up to the pool boot deadline) PLUS
+# an on-box torch/gsplat download (~800MB torch, slow on some hosts ≈ 25min). A
+# reaped-and-re-rented slow host can stack these, so the window has to cover a
+# couple of boot attempts. A prebaked image (torch/gsplat/pycolmap preinstalled)
+# would cut boot to a few minutes and let this drop back to ~15min.
+_SCHEDULE_TO_START = timedelta(minutes=60)
 
 
 @workflow.defn

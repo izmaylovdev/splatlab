@@ -72,6 +72,34 @@ PY
 
 echo "==> SplatLab vast.ai bootstrap  (torch $TORCH_VERSION+$CUDA_TAG, port $PORT)"
 
+# ---- Prebaked-image fast path ----------------------------------------------
+# The prebaked box image (deploy/Dockerfile.box) ships a venv at /opt/venv with
+# torch + gsplat + pycolmap + the server requirements already installed, and sets
+# SPLATLAB_PREBAKED=1. Skip venv creation and ALL installs — just use that venv
+# and start the worker. This turns a 30-45min cold boot into ~1min after pull.
+if [ "${SPLATLAB_PREBAKED:-0}" = "1" ]; then
+  export PATH="/opt/venv/bin:$PATH"
+  if python -c 'import torch, gsplat, pycolmap' >/dev/null 2>&1; then
+    echo "==> Prebaked image — deps already installed, skipping setup"
+    command -v nvidia-smi >/dev/null 2>&1 && \
+      nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader || true
+    emit_stage deps-installed
+    emit_stage torch-installed
+    emit_stage gsplat-installed
+    export TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-localhost:7233}"
+    export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
+    export SPLATLAB_STORAGE="${SPLATLAB_STORAGE:-local}"
+    if [ "$RUN_SERVER" = "1" ]; then
+      echo "==> Starting SplatLab worker (Temporal=$TEMPORAL_ADDRESS, storage=$SPLATLAB_STORAGE)"
+      emit_stage worker-starting
+      exec bash deploy/run_worker.sh
+    fi
+    echo "==> Setup complete (prebaked, --no-run)."
+    exit 0
+  fi
+  echo "!! SPLATLAB_PREBAKED=1 but torch/gsplat/pycolmap not importable — full setup" >&2
+fi
+
 # ---- Base tools -------------------------------------------------------------
 # The slim CUDA runtime base has no python/git/curl. Install them (plus the
 # system libs pycolmap/opencv need at runtime) before anything else. On a fat

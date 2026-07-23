@@ -12,7 +12,9 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-. .venv/bin/activate
+# Prefer a repo-local .venv (slim-image path); the prebaked image instead ships
+# its venv on PATH (/opt/venv) and has no .venv here, so activation is optional.
+[ -f .venv/bin/activate ] && . .venv/bin/activate
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0+PTX}"

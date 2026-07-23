@@ -1,0 +1,45 @@
+# Prebaked SplatLab GPU-box image.
+#
+# A rented Vast.ai box's slowest step was installing deps on boot — an ~800MB
+# torch download from pytorch.org at community-host speeds took 25-45min and was
+# unreliable. This image bakes ALL runtime deps (torch + gsplat + pycolmap + the
+# server requirements) into a venv at /opt/venv, so a box only has to PULL the
+# image, git-clone the repo for the latest code, and start the worker.
+#
+# Built for linux/amd64 by .github/workflows/box-image.yml and pushed to
+#   ghcr.io/izmaylovdev/splatlab-box:latest
+# The box bootstrap (deploy/vast_setup.sh) detects SPLATLAB_PREBAKED=1 and skips
+# all installs.
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-venv python3-pip git curl ca-certificates \
+      libgl1 libgomp1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Prebaked venv on PATH — the box uses this python (has torch/gsplat/pycolmap);
+# it never creates its own .venv.
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3 -m venv "$VIRTUAL_ENV"
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+RUN pip install --no-cache-dir --upgrade pip
+
+# Match deploy/vast_setup.sh's defaults so the baked deps == what the box expects.
+ARG TORCH_VERSION=2.4.1
+ARG TV_VERSION=0.19.1
+ARG CUDA_TAG=cu121
+
+# torch first (CUDA build), then the server requirements (CPU deps + pycolmap),
+# then the prebuilt gsplat wheel (skips the on-import CUDA compile).
+RUN pip install --no-cache-dir "torch==${TORCH_VERSION}" "torchvision==${TV_VERSION}" \
+      --index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir gsplat --index-url "https://docs.gsplat.studio/whl/pt24${CUDA_TAG}"
+
+# Sanity-check the baked env at build time so a broken image never ships.
+RUN python -c "import torch, gsplat, pycolmap; print('baked torch', torch.__version__)"
+
+# The bootstrap checks this to skip venv creation + all installs.
+ENV SPLATLAB_PREBAKED=1
