@@ -151,9 +151,11 @@ emit_stage torch-installed
 
 if [ "$GSPLAT_WHEEL" = "1" ]; then
   # Prebuilt wheel — skips the on-import CUDA compile. Index is torch/cuda specific;
-  # the pt24cu121 tag matches the default torch 2.4.x + cu121 above.
+  # the pt24cu121 tag matches the default torch 2.4.x + cu121 above. That index has
+  # ONLY gsplat, so install gsplat's deps from PyPI first, then the wheel --no-deps.
   echo "==> Installing gsplat from prebuilt wheel index"
-  pip install gsplat --index-url "https://docs.gsplat.studio/whl/pt24${CUDA_TAG}"
+  pip install ninja jaxtyping rich
+  pip install gsplat --no-deps --index-url "https://docs.gsplat.studio/whl/pt24${CUDA_TAG}"
 else
   # Compile against the image's CUDA toolkit (works out of the box on vast CUDA images).
   echo "==> Installing gsplat (compiles CUDA kernels on first import)"

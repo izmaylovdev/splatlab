@@ -36,7 +36,12 @@ RUN pip install --no-cache-dir "torch==${TORCH_VERSION}" "torchvision==${TV_VERS
       --index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
-RUN pip install --no-cache-dir gsplat --index-url "https://docs.gsplat.studio/whl/pt24${CUDA_TAG}"
+# gsplat's prebuilt-wheel index has ONLY gsplat — using it as --index-url hides
+# PyPI, so gsplat's own deps (ninja, jaxtyping, rich) can't resolve. Install those
+# from PyPI first, then pull just the gsplat wheel with --no-deps.
+RUN pip install --no-cache-dir ninja jaxtyping rich
+RUN pip install --no-cache-dir gsplat --no-deps \
+      --index-url "https://docs.gsplat.studio/whl/pt24${CUDA_TAG}"
 
 # Sanity-check the baked env at build time so a broken image never ships.
 RUN python -c "import torch, gsplat, pycolmap; print('baked torch', torch.__version__)"
