@@ -38,14 +38,17 @@ RUN /opt/venv/bin/pip install --no-cache-dir "torch==${TORCH_VERSION}" "torchvis
 COPY requirements.txt /tmp/requirements.txt
 RUN /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
 # gsplat's prebuilt-wheel index has ONLY gsplat — using it as --index-url hides
-# PyPI, so gsplat's own deps (ninja, jaxtyping, rich) can't resolve. Install those
-# from PyPI first, then pull just the gsplat wheel with --no-deps.
-RUN /opt/venv/bin/pip install --no-cache-dir ninja jaxtyping rich
+# PyPI, so gsplat's own deps can't resolve. Install them from PyPI first, then pull
+# just the gsplat wheel with --no-deps. NOTE: gsplat imports several of these
+# LAZILY (e.g. `from packaging import version` only at first render), so a plain
+# `import gsplat` won't surface a missing one — they must be listed explicitly.
+RUN /opt/venv/bin/pip install --no-cache-dir ninja jaxtyping rich packaging typing_extensions
 RUN /opt/venv/bin/pip install --no-cache-dir gsplat --no-deps \
       --index-url "https://docs.gsplat.studio/whl/pt24${CUDA_TAG}"
 
-# Sanity-check the baked env at build time so a broken image never ships.
-RUN /opt/venv/bin/python -c "import torch, gsplat, pycolmap; print('baked torch', torch.__version__)"
+# Sanity-check the baked env at build time so a broken image never ships. Import
+# gsplat's lazy deps explicitly too (a bare `import gsplat` wouldn't catch them).
+RUN /opt/venv/bin/python -c "import torch, gsplat, pycolmap, packaging, jaxtyping, rich, ninja, typing_extensions; print('baked torch', torch.__version__)"
 
 # The bootstrap checks this to skip venv creation + all installs.
 ENV SPLATLAB_PREBAKED=1

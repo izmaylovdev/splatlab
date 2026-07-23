@@ -154,7 +154,9 @@ if [ "$GSPLAT_WHEEL" = "1" ]; then
   # the pt24cu121 tag matches the default torch 2.4.x + cu121 above. That index has
   # ONLY gsplat, so install gsplat's deps from PyPI first, then the wheel --no-deps.
   echo "==> Installing gsplat from prebuilt wheel index"
-  pip install ninja jaxtyping rich
+  # gsplat lazily imports some deps (e.g. `packaging`) only at render time, so list
+  # them explicitly — --no-deps + the gsplat-only index won't pull them otherwise.
+  pip install ninja jaxtyping rich packaging typing_extensions
   pip install gsplat --no-deps --index-url "https://docs.gsplat.studio/whl/pt24${CUDA_TAG}"
 else
   # Compile against the image's CUDA toolkit (works out of the box on vast CUDA images).
