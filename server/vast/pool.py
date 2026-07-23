@@ -105,6 +105,12 @@ def _box_env(box_id: str) -> dict[str, str]:
     env["SPLATLAB_BOX_ID"] = box_id
     env["SPLATLAB_STORAGE"] = "s3"            # ephemeral box shares no FS with API
     env.setdefault("GSPLAT_WHEEL", "1")       # prebuilt wheel: skips the slow CUDA compile on boot
+    # The prebaked image (deploy/Dockerfile.box) deliberately does NOT put its venv
+    # on the global PATH (that breaks Vast's onstart), and Vast may not propagate the
+    # image's own ENV into onstart — so signal the prebaked fast path via the box env
+    # too. vast_setup.sh falls back to a full install if the baked deps aren't there.
+    if "splatlab-box" in config.VAST_IMAGE:
+        env["SPLATLAB_PREBAKED"] = "1"
     return env
 
 

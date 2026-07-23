@@ -18,12 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libgl1 libgomp1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Prebaked venv on PATH — the box uses this python (has torch/gsplat/pycolmap);
-# it never creates its own .venv.
-ENV VIRTUAL_ENV=/opt/venv
-RUN python3 -m venv "$VIRTUAL_ENV"
-ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-RUN pip install --no-cache-dir --upgrade pip
+# Prebaked venv at /opt/venv. CRITICAL: do NOT put it on the global PATH via ENV.
+# Vast's onstart/provisioning wrapper calls `python`; shadowing the system python
+# with the venv breaks Vast's container init, so the box never runs onstart (the
+# container won't stay up and no boot stage is emitted). Instead the venv is put on
+# PATH only inside deploy/vast_setup.sh's prebaked fast path. Here in the build we
+# reference /opt/venv/bin explicitly.
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir --upgrade pip
 
 # Match deploy/vast_setup.sh's defaults so the baked deps == what the box expects.
 ARG TORCH_VERSION=2.4.1
@@ -32,19 +33,19 @@ ARG CUDA_TAG=cu121
 
 # torch first (CUDA build), then the server requirements (CPU deps + pycolmap),
 # then the prebuilt gsplat wheel (skips the on-import CUDA compile).
-RUN pip install --no-cache-dir "torch==${TORCH_VERSION}" "torchvision==${TV_VERSION}" \
+RUN /opt/venv/bin/pip install --no-cache-dir "torch==${TORCH_VERSION}" "torchvision==${TV_VERSION}" \
       --index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
 # gsplat's prebuilt-wheel index has ONLY gsplat — using it as --index-url hides
 # PyPI, so gsplat's own deps (ninja, jaxtyping, rich) can't resolve. Install those
 # from PyPI first, then pull just the gsplat wheel with --no-deps.
-RUN pip install --no-cache-dir ninja jaxtyping rich
-RUN pip install --no-cache-dir gsplat --no-deps \
+RUN /opt/venv/bin/pip install --no-cache-dir ninja jaxtyping rich
+RUN /opt/venv/bin/pip install --no-cache-dir gsplat --no-deps \
       --index-url "https://docs.gsplat.studio/whl/pt24${CUDA_TAG}"
 
 # Sanity-check the baked env at build time so a broken image never ships.
-RUN python -c "import torch, gsplat, pycolmap; print('baked torch', torch.__version__)"
+RUN /opt/venv/bin/python -c "import torch, gsplat, pycolmap; print('baked torch', torch.__version__)"
 
 # The bootstrap checks this to skip venv creation + all installs.
 ENV SPLATLAB_PREBAKED=1
