@@ -1,9 +1,13 @@
 name: box-image
 
-# Build the prebaked GPU-box image (deploy/Dockerfile.box) for linux/amd64 and
-# push it to GHCR. Native amd64 on GitHub's runners avoids emulation and keeps the
-# ~7GB push inside GitHub's network. Rented Vast boxes then pull this instead of
-# installing torch/gsplat on boot.
+# Build the prebaked GPU-box image (deploy/Dockerfile.box) for linux/amd64 and push
+# it to Docker Hub AND GHCR. Native amd64 on GitHub's runners avoids emulation and
+# keeps the ~7GB push inside GitHub's network. Rented Vast boxes pull this instead
+# of installing torch/gsplat on boot. Docker Hub is the primary pull source — Vast
+# hosts pull it much faster (often cached) than GHCR, which was the boot bottleneck.
+#
+# Requires repo secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (a Docker Hub access
+# token with Read/Write). The image is pushed to <DOCKERHUB_USERNAME>/splatlab-box.
 #
 # Triggers: a change to the image inputs on main, or a manual run.
 on:
@@ -29,12 +33,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/Dockerfile.box
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/izmaylovdev/splatlab-box:latest
+          tags: |
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/splatlab-box:latest
+            ghcr.io/izmaylovdev/splatlab-box:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
