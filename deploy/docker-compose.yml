@@ -197,6 +197,10 @@ services:
       # at Docker Hub (faster pulls than GHCR): VAST_IMAGE=docker.io/<user>/splatlab-box:latest
       VAST_IMAGE: ${VAST_IMAGE:-ghcr.io/izmaylovdev/splatlab-box:latest}
       VAST_GPU_NAME: ${VAST_GPU_NAME:-}
+      # Minimum host download speed (Mbps). The pool rents the cheapest passing
+      # offer and cheap==slow, so this floor is what makes boxes actually boot:
+      # too low and the box can't pull the ~7GB image before the boot deadline.
+      VAST_MIN_INET_MBPS: ${VAST_MIN_INET_MBPS:-2000}
       VAST_MAX_PRICE: ${VAST_MAX_PRICE:-0.60}
       SPLATLAB_POOL_MAX_BOXES: ${SPLATLAB_POOL_MAX_BOXES:-3}
       # Boot deadline must cover the on-box torch/gsplat download, which is slow on

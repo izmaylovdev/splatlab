@@ -77,9 +77,14 @@ VAST_MIN_GPU_RAM_GB = float(_env("VAST_MIN_GPU_RAM_GB", "16"))
 VAST_MIN_RELIABILITY = float(_env("VAST_MIN_RELIABILITY", "0.99"))
 VAST_MAX_PRICE = float(_env("VAST_MAX_PRICE", "0.60"))   # $/hr ceiling per box
 # Host-quality bars (dodge flaky community boxes that can't hold a tunnel).
-# Minimum measured internet down speed (Mbps) — low-bandwidth hosts struggle to
-# pull the image and move data over the tunnel. Applied as an API filter.
-VAST_MIN_INET_MBPS = float(_env("VAST_MIN_INET_MBPS", "200"))
+# Minimum measured internet down speed (Mbps) — this is THE knob that decides
+# whether a box boots. The pool rents the CHEAPEST offer that passes the filter,
+# and cheap correlates strongly with slow: with the old 200 floor the cheapest
+# match was a ~279Mbps host, which could not pull the ~7GB prebaked image inside
+# the boot deadline — runs died in a rent→boot-timeout→rent loop. Raising the
+# floor to 2000 costs ~$0.10/hr more and picks hosts that pull in minutes.
+# Applied as an API filter (`inet_down`, the Download speed in Vast's UI).
+VAST_MIN_INET_MBPS = float(_env("VAST_MIN_INET_MBPS", "2000"))
 # Required host verification tier, matched client-side against each offer's
 # `verification` field ("verified" = datacenter-grade, "unverified" = community,
 # "deverified" = flagged-bad). "verified" is safest; "" disables the check;
