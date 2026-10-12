@@ -57,6 +57,21 @@ _GPU_QUEUE = config.GPU_TASK_QUEUE
 # would cut boot to a few minutes and let this drop back to ~15min.
 _SCHEDULE_TO_START = timedelta(minutes=60)
 
+# How long Temporal waits for the next activity heartbeat before declaring the
+# activity dead. The activity itself beats every 10s (activities/runner.py), so
+# this is pure slack for the network in between — and that network is a single
+# ngrok agent on the Mac carrying Temporal, Redis AND the bulk MinIO traffic. A
+# training run pulls the undistorted dataset down and pushes .ply snapshots back
+# through that same uplink; while a multi-hundred-MB transfer saturates it the
+# heartbeat RPC can be starved for minutes even though the box is perfectly
+# healthy. At 60s that killed a 29-minute-in room run (15k steps, 76 images).
+#
+# Raising this does NOT slow down /stop: cancellation rides the heartbeat
+# *response*, throttled at SPLATLAB_HEARTBEAT_THROTTLE (5s), independent of this
+# timeout. The only cost is that a box which dies hard takes this long to notice,
+# which start_to_close still bounds.
+_HEARTBEAT_TIMEOUT = timedelta(minutes=10)
+
 
 @workflow.defn
 class SplatTrainingWorkflow:
@@ -97,7 +112,7 @@ class SplatTrainingWorkflow:
             task_queue=_GPU_QUEUE,
             schedule_to_start_timeout=_SCHEDULE_TO_START,
             start_to_close_timeout=timedelta(hours=3),
-            heartbeat_timeout=timedelta(minutes=5),
+            heartbeat_timeout=_HEARTBEAT_TIMEOUT,
             cancellation_type=ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
             retry_policy=_NO_RETRY,
         )
@@ -124,7 +139,7 @@ class SplatTrainingWorkflow:
             task_queue=_GPU_QUEUE,
             schedule_to_start_timeout=_SCHEDULE_TO_START,
             start_to_close_timeout=timedelta(hours=12),
-            heartbeat_timeout=timedelta(seconds=60),
+            heartbeat_timeout=_HEARTBEAT_TIMEOUT,
             cancellation_type=ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
             retry_policy=_NO_RETRY,
         )
