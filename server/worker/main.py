@@ -111,7 +111,9 @@ class _BoxTracker(Interceptor):
 def _gpu_worker(client: Client) -> Worker:
     interceptors: list[Interceptor] = []
     if BOX_ID:
-        r = redis.Redis.from_url(config.REDIS_URL)
+        r = redis.Redis.from_url(config.REDIS_URL,
+                                 socket_timeout=config.REDIS_SOCKET_TIMEOUT,
+                                 socket_connect_timeout=config.REDIS_SOCKET_TIMEOUT)
         interceptors.append(_BoxTracker(r, BOX_ID))
     return Worker(
         client,

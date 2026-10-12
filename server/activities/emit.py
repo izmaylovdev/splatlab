@@ -23,7 +23,9 @@ EmitFn = Callable[[dict[str, Any]], None]
 
 
 def make_redis_emitter(pid: str, run_id: str) -> EmitFn:
-    r = redis.Redis.from_url(config.REDIS_URL)
+    r = redis.Redis.from_url(config.REDIS_URL,
+                             socket_timeout=config.REDIS_SOCKET_TIMEOUT,
+                             socket_connect_timeout=config.REDIS_SOCKET_TIMEOUT)
     storage = get_storage()
     proj_dir = storage.project_dir(pid)
 
@@ -46,6 +48,14 @@ def make_redis_emitter(pid: str, run_id: str) -> EmitFn:
             pipe.xadd(history_key(pid), {"data": payload},
                       maxlen=config.HISTORY_MAXLEN, approximate=True)
             pipe.expire(history_key(pid), config.HISTORY_TTL_SECONDS)
-        pipe.execute()
+        # Live telemetry is best-effort: a slow or briefly unreachable Redis (the
+        # box reaches it over a tunnel) must not kill a training run — or mask
+        # the real error when the activity reports a failure. Artifact uploads
+        # above still raise: those are the results, not telemetry.
+        try:
+            pipe.execute()
+        except redis.RedisError as e:
+            print(f"[emit] dropped {t} event for {pid}: {type(e).__name__}: {e}",
+                  flush=True)
 
     return emit

@@ -36,6 +36,12 @@ TASK_QUEUE = GPU_TASK_QUEUE  # legacy alias
 
 # ---- Redis (live telemetry bus) --------------------------------------------
 REDIS_URL = _env("REDIS_URL", "redis://localhost:6379")
+# Socket timeout (s) for Redis clients on a GPU box. redis-py 8 defaults to 5s,
+# but a box reaches Redis through the GCP relay and the user's home uplink: each
+# round trip is ~0.4s idle and seconds while a dataset/snapshot transfer shares
+# the link, and connecting takes several round trips (HELLO, AUTH, SETINFO) — so
+# 5s timed out mid-run and failed trainings.
+REDIS_SOCKET_TIMEOUT = float(_env("SPLATLAB_REDIS_TIMEOUT", "30"))
 # How many progress events to retain per project, and how many to replay on
 # WebSocket connect (matches the old in-memory ProjectManager behaviour).
 HISTORY_MAXLEN = int(_env("SPLATLAB_HISTORY_MAXLEN", "3000"))
