@@ -8,8 +8,9 @@ COLMAP runs as a subprocess that can't be interrupted mid-stage, so a stop takes
 effect at the next stage boundary / on completion.
 
 On success it also publishes a *reviewable* sparse point cloud: the SfM points
-exported as a splat ``.ply`` (colmap/points.ply) plus a tiny sfm.json sidecar,
-and emits an ``sfm`` event carrying the point-cloud URL + counts. The two-phase
+exported as a splat ``.ply`` (colmap/points.ply), the registered camera poses
+(colmap/cameras.json) so the viewer can draw the capture path, plus a tiny
+sfm.json sidecar, and emits an ``sfm`` event carrying the point-cloud URL + counts. The two-phase
 workflow's SFM run ends here, letting the user inspect the reconstruction before
 committing a GPU to training.
 """
@@ -21,7 +22,7 @@ import threading
 
 from temporalio import activity
 
-from ..shared.constants import SFM_META_REL, SFM_POINTS_REL
+from ..shared.constants import SFM_CAMERAS_REL, SFM_META_REL, SFM_POINTS_REL
 from ..shared.storage import get_storage
 from ..workflows.types import ColmapArgs, ColmapResult
 from .emit import make_redis_emitter
@@ -53,16 +54,44 @@ def _undistorted_valid(undist: str) -> bool:
             or os.path.exists(os.path.join(model, "cameras.txt")))
 
 
-def _export_points(undist: str, out_ply: str) -> tuple[int, int]:
+def _export_points(undist: str, out_ply: str, out_cams: str) -> tuple[int, int]:
     """Read the undistorted sparse model and write the reviewable point-cloud
-    .ply. Returns (num_points, num_registered_images)."""
+    .ply plus the camera poses JSON. Returns (num_points, num_registered_images)."""
     from ..shared.colmap_io import read_model
     from ..shared.splat_export import export_points_ply
 
-    _cameras, images, (xyz, rgb) = read_model(_sparse_model_dir(undist))
+    cameras, images, (xyz, rgb) = read_model(_sparse_model_dir(undist))
     os.makedirs(os.path.dirname(out_ply), exist_ok=True)
     export_points_ply(out_ply, xyz, rgb)
+    with open(out_cams, "w") as f:
+        json.dump(_camera_poses(cameras, images), f, separators=(",", ":"))
     return int(len(xyz)), int(len(images))
+
+
+def _camera_poses(cameras: dict, images: dict) -> dict:
+    """Registered cameras in COLMAP world space, ordered by image name — frames
+    extracted from video are named by time, so this order is the flight path.
+
+    Each entry has the camera centre ``c`` and ``r``, the world->camera rotation
+    rows (camera right / down / forward axes in world space, OpenCV convention),
+    plus the intrinsics needed to draw a correctly shaped frustum. The
+    undistorted model is PINHOLE: params = fx, fy, cx, cy.
+    """
+    from ..shared.colmap_io import qvec2rotmat
+
+    out = []
+    for img in sorted(images.values(), key=lambda im: im.name):
+        cam = cameras[img.camera_id]
+        R = qvec2rotmat(img.qvec)
+        c = -R.T @ img.tvec
+        out.append({
+            "name": img.name,
+            "c": [round(float(v), 5) for v in c],
+            "r": [[round(float(v), 5) for v in row] for row in R],
+            "f": [round(float(cam.params[0]), 2), round(float(cam.params[1]), 2)],
+            "size": [int(cam.width), int(cam.height)],
+        })
+    return {"cameras": out}
 
 
 @activity.defn
@@ -95,7 +124,8 @@ async def run_colmap_activity(args: ColmapArgs) -> ColmapResult:
 
         # Publish the reviewable sparse cloud (fresh or cached path alike).
         emit({"type": "status", "stage": "review", "detail": "exporting sparse points"})
-        n_points, n_images = _export_points(undist, os.path.join(work, "points.ply"))
+        n_points, n_images = _export_points(undist, os.path.join(work, "points.ply"),
+                                            os.path.join(work, "cameras.json"))
         with open(os.path.join(work, "sfm.json"), "w") as f:
             json.dump({"num_points": n_points, "num_images": n_images}, f)
         return undist, n_points, n_images
@@ -114,9 +144,11 @@ async def run_colmap_activity(args: ColmapArgs) -> ColmapResult:
     storage.upload_dir(pid, rel)
     storage.upload_artifact(pid, SFM_POINTS_REL)
     storage.upload_artifact(pid, SFM_META_REL)
+    storage.upload_artifact(pid, SFM_CAMERAS_REL)
 
     points_uri = storage.public_url(pid, SFM_POINTS_REL)
     emit({"type": "sfm", "url": points_uri,
+          "cameras_url": storage.public_url(pid, SFM_CAMERAS_REL),
           "num_points": n_points, "num_images": n_images})
     return ColmapResult(undistorted_rel=rel, points_rel=SFM_POINTS_REL,
                         points_uri=points_uri, num_points=n_points, num_images=n_images)

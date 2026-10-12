@@ -11,3 +11,4 @@ VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".wmv", ".mpg", "
 UNDISTORTED_REL = "colmap/undistorted"   # PINHOLE dataset the trainer consumes
 SFM_POINTS_REL = "colmap/points.ply"     # sparse SfM cloud, as a viewable splat .ply
 SFM_META_REL = "colmap/sfm.json"         # {"num_points": int, "num_images": int}
+SFM_CAMERAS_REL = "colmap/cameras.json"  # registered camera poses, for the viewer

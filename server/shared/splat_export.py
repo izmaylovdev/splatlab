@@ -60,14 +60,32 @@ def rgb_to_sh0(rgb: np.ndarray) -> np.ndarray:
     return (rgb - 0.5) / SH_C0
 
 
+def _median_nn_spacing(xyz: np.ndarray, samples: int = 1000, chunk: int = 64) -> float:
+    """Median distance from a point to its nearest neighbour, estimated on a
+    random sample (brute force in chunks: memory ~chunk*N floats, no scipy)."""
+    n = xyz.shape[0]
+    if n < 2:
+        return 0.0
+    rng = np.random.default_rng(0)
+    pick = xyz[rng.choice(n, min(samples, n), replace=False)]
+    sq = (xyz * xyz).sum(1)
+    nn = []
+    for i in range(0, len(pick), chunk):
+        p = pick[i:i + chunk]
+        d2 = (p * p).sum(1)[:, None] + sq[None, :] - 2.0 * p @ xyz.T
+        # column 0 of the partition is the point itself (distance ~0)
+        nn.append(np.partition(d2, 1, axis=1)[:, 1])
+    return float(np.sqrt(np.maximum(np.median(np.concatenate(nn)), 0.0)))
+
+
 def export_points_ply(path: str, xyz: np.ndarray, rgb: np.ndarray) -> None:
     """Write a sparse SfM point cloud as a 3DGS ``.ply`` for *review*.
 
     Each SfM point becomes a tiny, opaque, isotropic Gaussian coloured by its
     SfM RGB, so the same GaussianSplats3D viewer that shows training snapshots
     can display the raw reconstruction the user is asked to sign off on. The
-    point size is a small fraction of the scene extent so dense scenes stay
-    crisp and sparse ones stay visible.
+    point size follows the typical spacing between neighbouring points, so
+    points read as distinct dots at any scene scale instead of merging into fog.
 
     xyz: [N,3] float, rgb: [N,3] uint8 (COLMAP points3D output).
     """
@@ -77,10 +95,16 @@ def export_points_ply(path: str, xyz: np.ndarray, rgb: np.ndarray) -> None:
     if n == 0:
         raise ValueError("no SfM points to export")
 
-    # Point radius: ~0.15% of the bounding-box diagonal (robust to scene scale),
-    # with a tiny floor so a degenerate cloud still renders.
-    diag = float(np.linalg.norm(xyz.max(0) - xyz.min(0)))
-    radius = max(diag * 0.0015, 1e-4)
+    # Point radius: half the median nearest-neighbour spacing, so neighbours
+    # just touch. Capped at ~0.15% of the bounding-box diagonal (the old rule,
+    # fine for compact indoor captures) and floored so a degenerate cloud still
+    # renders. The box spans the 1st-99th percentiles: outdoor/aerial clouds
+    # have far-off points (horizon, sky mismatches) that would otherwise
+    # inflate it ~10x. Box-only sizing made aerial points ~7x their spacing —
+    # one blur that hid the scene.
+    lo, hi = np.percentile(xyz, [1, 99], axis=0)
+    diag = float(np.linalg.norm(hi - lo))
+    radius = max(min(0.5 * _median_nn_spacing(xyz), diag * 0.0015), 1e-4)
 
     scales = np.full((n, 3), radius, dtype=np.float32)
     quats = np.tile(np.array([1, 0, 0, 0], dtype=np.float32), (n, 1))  # identity

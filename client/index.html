@@ -116,6 +116,10 @@
   }
   #viewerTag { position: absolute; top: 10px; left: 12px; z-index: 3; font-size: 12px;
     color: var(--muted); background: rgba(14,17,22,.7); padding: 3px 9px; border-radius: 999px; }
+  #camToggle { position: absolute; top: 8px; right: 12px; z-index: 3; font-size: 12px;
+    color: var(--muted); background: rgba(14,17,22,.7); padding: 3px 10px; border-radius: 999px;
+    border: 1px solid transparent; cursor: pointer; }
+  #camToggle.on { color: var(--text, #e6edf3); border-color: rgba(255,255,255,.25); }
   /* bottom row */
   #bottomRow { display: grid; grid-template-columns: 300px 1fr 1fr; gap: 10px; min-height: 0; }
   #liveImg { width: 100%; height: 100%; object-fit: contain; background: #000;
@@ -165,17 +169,17 @@
         <div class="card">
           <h3>Photos</h3>
           <div id="drop">
-            <b>Upload photos or a video</b><br>
+            <b>Upload photos or videos</b><br>
             <span style="font-size:12px">click to choose a folder, or drag &amp; drop<br>30–300 overlapping photos — or a short clip that pans around the subject</span>
           </div>
           <input type="file" id="dirInput" webkitdirectory multiple style="display:none">
           <input type="file" id="filesInput" multiple accept="image/*" style="display:none">
-          <input type="file" id="videoInput" accept="video/*" style="display:none">
+          <input type="file" id="videoInput" multiple accept="video/*" style="display:none">
           <div id="uploadStat">no photos yet</div>
           <div id="uploadBar"><div id="uploadBarFill"></div></div>
           <div class="row">
             <button id="btnFiles">Add single files</button>
-            <button id="btnVideo">Upload video</button>
+            <button id="btnVideo">Upload videos</button>
             <button id="btnClearPhotos" class="danger">Clear</button>
           </div>
         </div>
@@ -209,6 +213,7 @@
 
       <div class="card" id="viewerCard">
         <div id="viewerTag">3D viewer</div>
+        <button id="camToggle" style="display:none" title="Show/hide the registered camera poses">Cameras</button>
         <div id="viewer3d"></div>
         <div id="viewerOverlay">The interactive splat viewer appears here<br>after the first snapshot</div>
       </div>
@@ -382,6 +387,84 @@ let viewer = null;
 let viewerLoading = false;
 let savedCam = null;
 
+// ---- camera path overlay: the SfM-registered camera poses, drawn as
+// frustums (green = first frame → red = last) joined by the capture path.
+let camGroup = null;
+let showCams = true;
+try { showCams = localStorage.getItem('splatlab.showCams') !== '0'; } catch (e) { /* ignore */ }
+const camPoseCache = new Map();   // url -> Promise<{cameras: [...]} | null>
+
+function loadCameraPoses(url) {
+  if (!camPoseCache.has(url)) {
+    camPoseCache.set(url, fetch(url).then(r => (r.ok ? r.json() : null)).catch(() => null));
+  }
+  return camPoseCache.get(url);
+}
+
+function buildCameraPath(THREE, cams) {
+  const n = cams.length;
+  const C = cams.map(c => new THREE.Vector3(...c.c));
+  const mean = C.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(n);
+  const extent = Math.max(...C.map(v => v.distanceTo(mean))) || 1;
+  // Frustum depth ~ the spacing between consecutive frames, so neighbours
+  // don't overlap into a solid smear; clamped to a sane share of the scene.
+  const steps = C.slice(1).map((v, i) => v.distanceTo(C[i])).sort((a, b) => a - b);
+  const median = steps.length ? steps[steps.length >> 1] : extent * 0.05;
+  const depth = Math.min(Math.max(median * 1.5, extent * 0.01), extent * 0.08);
+
+  const pos = [], col = [];
+  const color = new THREE.Color();
+  const seg = (a, b) => { pos.push(a.x, a.y, a.z, b.x, b.y, b.z);
+                          col.push(color.r, color.g, color.b, color.r, color.g, color.b); };
+  cams.forEach((c, i) => {
+    color.setHSL(0.33 * (1 - i / Math.max(1, n - 1)), 0.9, 0.55);
+    const [right, down, fwd] = c.r.map(row => new THREE.Vector3(...row));
+    const hw = c.size[0] / 2 / c.f[0] * depth, hh = c.size[1] / 2 / c.f[1] * depth;
+    const mid = C[i].clone().addScaledVector(fwd, depth);
+    const k = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) =>
+      mid.clone().addScaledVector(right, sx * hw).addScaledVector(down, sy * hh));
+    for (let j = 0; j < 4; j++) { seg(C[i], k[j]); seg(k[j], k[(j + 1) % 4]); }
+    // small triangle above the top edge marks the camera's "up"
+    const tip = k[0].clone().lerp(k[1], 0.5).addScaledVector(down, -hh * 0.6);
+    seg(k[0], tip); seg(tip, k[1]);
+  });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  const group = new THREE.Group();
+  group.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ vertexColors: true })));
+  group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(C),
+    new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 })));
+
+  // A sensible starting view: just behind the first frame, looking where it
+  // looked, with "up" = the cameras' average up (COLMAP's world axes are
+  // arbitrary, so a fixed up vector often leaves the scene sideways).
+  const up = cams.reduce((a, c) => a.sub(new THREE.Vector3(...c.r[1])), new THREE.Vector3())
+    .normalize();
+  const fwd0 = new THREE.Vector3(...cams[0].r[2]);
+  group.userData.view = {
+    up: up.toArray(),
+    pos: C[0].clone().addScaledVector(fwd0, -depth * 4).toArray(),
+    look: C[0].clone().addScaledVector(fwd0, extent).toArray(),
+  };
+  return group;
+}
+
+function updateCamToggle() {
+  const b = $('camToggle');
+  b.style.display = camGroup ? '' : 'none';
+  b.classList.toggle('on', showCams);
+  if (camGroup) {
+    camGroup.visible = showCams;
+    b.textContent = `Cameras (${camGroup.userData.count})`;
+  }
+}
+$('camToggle').onclick = () => {
+  showCams = !showCams;
+  try { localStorage.setItem('splatlab.showCams', showCams ? '1' : '0'); } catch (e) { /* ignore */ }
+  updateCamToggle();
+};
+
 async function loadSnapshot(url, tag) {
   lastSnapshotUrl = url;
   loadSnapshot._tag = tag;
@@ -401,11 +484,29 @@ async function loadSnapshot(url, tag) {
       viewer = null;
       $('viewer3d').innerHTML = '';
     }
+    camGroup = null;
+    updateCamToggle();
+    // Camera poses share the SfM world frame with both the sparse points and
+    // the trained splats (the trainer applies no transform), so one overlay
+    // fits either. Missing/failed poses just mean no overlay.
+    const camsUrl = current && current.sfm_cameras;
+    const poses = camsUrl ? await loadCameraPoses(camsUrl) : null;
+    let threeScene;
+    if (poses && poses.cameras && poses.cameras.length) {
+      const THREE = await import('three');
+      threeScene = new THREE.Scene();
+      camGroup = buildCameraPath(THREE, poses.cameras);
+      camGroup.userData.count = poses.cameras.length;
+      threeScene.add(camGroup);
+    }
     viewer = new GaussianSplats3D.Viewer({
       rootElement: $('viewer3d'),
-      cameraUp: [0, -1, 0],
-      initialCameraPosition: savedCam ? savedCam.pos : [0, 0, -5],
-      initialCameraLookAt: savedCam ? savedCam.look : [0, 0, 0],
+      threeScene,
+      cameraUp: camGroup ? camGroup.userData.view.up : [0, -1, 0],
+      initialCameraPosition: savedCam ? savedCam.pos
+        : camGroup ? camGroup.userData.view.pos : [0, 0, -5],
+      initialCameraLookAt: savedCam ? savedCam.look
+        : camGroup ? camGroup.userData.view.look : [0, 0, 0],
       sharedMemoryForWorkers: false,
       gpuAcceleratedSort: false,
       selfDrivenMode: true,
@@ -417,6 +518,7 @@ async function loadSnapshot(url, tag) {
       splatAlphaRemovalThreshold: 5,
     });
     viewer.start();
+    updateCamToggle();
     $('viewerTag').textContent = loadSnapshot._tag ||
       ('3D viewer — ' + decodeURIComponent(url.split('/').pop().split('?')[0]));
   } catch (e) {
@@ -485,6 +587,8 @@ function showViewerOverlay(text) {
   ov.style.display = 'flex';
   ov.textContent = text;
   $('viewerTag').textContent = '3D viewer';
+  camGroup = null;
+  updateCamToggle();
 }
 
 async function selectProject(pid) {
@@ -540,7 +644,7 @@ function handleEvent(m) {
       // Carry the durable poses/snapshot facts onto `current` so the controls
       // reflect them across reconnects.
       if (current) { current.poses_ready = p.poses_ready; current.sfm_points = p.sfm_points;
-                     current.snapshots = p.snapshots; }
+                     current.sfm_cameras = p.sfm_cameras; current.snapshots = p.snapshots; }
       updateControls(p.status);
       if (p.stage) $('stageDetail').textContent = `${p.stage.stage}: ${p.stage.detail}`;
       for (const h of m.history) pushProgress(h, true);
@@ -569,7 +673,8 @@ function handleEvent(m) {
       $('liveImg').src = 'data:image/jpeg;base64,' + m.jpeg_b64;
       break;
     case 'sfm':                       // SFM finished — poses ready to review
-      if (current) { current.poses_ready = true; current.sfm_points = m.url; }
+      if (current) { current.poses_ready = true; current.sfm_points = m.url;
+                     current.sfm_cameras = m.cameras_url; }
       updateControls('poses_ready');
       $('stageDetail').textContent =
         `${(m.num_points || 0).toLocaleString()} points · ${m.num_images || 0} images`;
@@ -701,43 +806,70 @@ async function uploadFiles(fileList) {
   }
 }
 
-async function uploadVideo(file) {
-  if (!file || uploading) return;
-  const frames = 150;
-  const fd = new FormData();
-  fd.append('file', file, file.name);
+// Frames to extract per video. One clip keeps the full 150; several share a
+// 250-frame budget — past 250 images COLMAP's "auto" matcher switches from
+// exhaustive to sequential, which only matches filename-adjacent frames and
+// would barely link frames across different videos.
+function framesPerVideo(n) {
+  return Math.min(150, Math.floor(250 / n));
+}
+
+async function uploadVideos(files) {
+  files = [...files];
+  if (!files.length || uploading) return;
+  const frames = framesPerVideo(files.length);
   setUploadBusy(true);
-  const t0 = performance.now();
-  $('uploadStat').textContent = `uploading ${file.name}…`;
-  setUploadBar(0, false);
+  let extracted = 0;
+  const failed = [];
   try {
-    const res = await xhrUpload(`/api/projects/${current.id}/video?frames=${frames}`, fd,
-      (loaded, total) => {
-        if (loaded < 0) {                       // bytes sent — server now extracting
-          setUploadBar(1, true);
-          $('uploadStat').textContent = `extracting frames from ${file.name}…`;
-          return;
-        }
-        const pct = total ? loaded / total : 0;
-        const secs = (performance.now() - t0) / 1000;
-        const spd = secs > 0 ? loaded / secs : 0;
-        setUploadBar(pct, false);
-        const eta = (spd > 0 && total) ? (total - loaded) / spd : 0;
-        $('uploadStat').textContent =
-          `uploading ${file.name} — ${(pct * 100).toFixed(0)}% ` +
-          `(${fmtMB(loaded)}/${fmtMB(total)} MB · ${fmtSpeed(spd)}` +
-          (eta ? ` · ${fmtETA(eta)} left` : '') + ')';
-      });
-    updatePhotoStat(res.total);
-    toast(`Extracted ${res.saved} frames from video`);
+    for (const [i, file] of files.entries()) {
+      const tag = files.length > 1 ? `[${i + 1}/${files.length}] ` : '';
+      try {
+        const res = await uploadVideo(file, frames, tag);
+        extracted += res.saved;
+        updatePhotoStat(res.total);
+      } catch (e) {
+        failed.push(file.name);
+        toast(`Video upload failed (${file.name}): ` + e.message, true);
+      }
+    }
+    if (extracted) {
+      const from = files.length - failed.length;
+      toast(`Extracted ${extracted} frames from ${from} video${from === 1 ? '' : 's'}`);
+    }
     refreshProjects();
-  } catch (e) {
-    toast('Video upload failed: ' + e.message, true);
-    const p = await api('/api/projects/' + current.id).catch(() => null);
-    if (p) updatePhotoStat(p.num_photos);
   } finally {
+    if (failed.length) {
+      const p = await api('/api/projects/' + current.id).catch(() => null);
+      if (p) updatePhotoStat(p.num_photos);
+    }
     setUploadBusy(false);
   }
+}
+
+function uploadVideo(file, frames, tag) {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  const t0 = performance.now();
+  $('uploadStat').textContent = `${tag}uploading ${file.name}…`;
+  setUploadBar(0, false);
+  return xhrUpload(`/api/projects/${current.id}/video?frames=${frames}`, fd,
+    (loaded, total) => {
+      if (loaded < 0) {                       // bytes sent — server now extracting
+        setUploadBar(1, true);
+        $('uploadStat').textContent = `${tag}extracting frames from ${file.name}…`;
+        return;
+      }
+      const pct = total ? loaded / total : 0;
+      const secs = (performance.now() - t0) / 1000;
+      const spd = secs > 0 ? loaded / secs : 0;
+      setUploadBar(pct, false);
+      const eta = (spd > 0 && total) ? (total - loaded) / spd : 0;
+      $('uploadStat').textContent =
+        `${tag}uploading ${file.name} — ${(pct * 100).toFixed(0)}% ` +
+        `(${fmtMB(loaded)}/${fmtMB(total)} MB · ${fmtSpeed(spd)}` +
+        (eta ? ` · ${fmtETA(eta)} left` : '') + ')';
+    });
 }
 
 $('drop').onclick = () => $('dirInput').click();
@@ -745,7 +877,7 @@ $('btnFiles').onclick = () => $('filesInput').click();
 $('btnVideo').onclick = () => $('videoInput').click();
 $('dirInput').onchange = (e) => uploadFiles(e.target.files);
 $('filesInput').onchange = (e) => uploadFiles(e.target.files);
-$('videoInput').onchange = (e) => uploadVideo(e.target.files[0]);
+$('videoInput').onchange = (e) => uploadVideos(e.target.files);
 $('drop').ondragover = (e) => { e.preventDefault(); $('drop').classList.add('hover'); };
 $('drop').ondragleave = () => $('drop').classList.remove('hover');
 $('drop').ondrop = async (e) => {
@@ -768,9 +900,11 @@ $('drop').ondrop = async (e) => {
   const items = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
   if (items.length) await Promise.all(items.map(walk));
   else files.push(...e.dataTransfer.files);
-  const video = files.find(f => /\.(mp4|mov|m4v|avi|mkv|webm|wmv|mpe?g)$/i.test(f.name));
-  if (video) return uploadVideo(video);
-  uploadFiles(files);
+  const isVideo = f => /\.(mp4|mov|m4v|avi|mkv|webm|wmv|mpe?g)$/i.test(f.name);
+  const videos = files.filter(isVideo);
+  if (videos.length) await uploadVideos(videos);
+  const photos = files.filter(f => !isVideo(f));
+  if (photos.length) uploadFiles(photos);
 };
 
 $('btnClearPhotos').onclick = async () => {

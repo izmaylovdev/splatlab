@@ -21,8 +21,8 @@ from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
 from fastapi.staticfiles import StaticFiles
 
 from .. import config
-from ..shared.constants import (IMAGE_EXTS, SFM_META_REL, SFM_POINTS_REL,
-                               VIDEO_EXTS)
+from ..shared.constants import (IMAGE_EXTS, SFM_CAMERAS_REL, SFM_META_REL,
+                               SFM_POINTS_REL, VIDEO_EXTS)
 from ..shared.storage import get_storage
 from . import meta as metamod
 from . import temporal_client as tc
@@ -58,6 +58,10 @@ async def _view(pid: str, meta: dict | None = None) -> dict:
     # exists in storage. It survives the SFM workflow completing / history GC.
     poses_ready = storage.artifact_exists(pid, SFM_POINTS_REL)
     sfm_points = storage.public_url(pid, SFM_POINTS_REL) if poses_ready else None
+    # Older projects predate the camera export; they get it on their next SFM run.
+    sfm_cameras = (storage.public_url(pid, SFM_CAMERAS_REL)
+                   if poses_ready and storage.artifact_exists(pid, SFM_CAMERAS_REL)
+                   else None)
     sfm_meta = storage.read_json(pid, SFM_META_REL) or {}
     sfm_live = (live or {}).get("sfm") or {}
     num_points = int(sfm_live.get("num_points") or sfm_meta.get("num_points") or 0)
@@ -81,6 +85,7 @@ async def _view(pid: str, meta: dict | None = None) -> dict:
         "config": cfg,
         "poses_ready": poses_ready,
         "sfm_points": sfm_points,
+        "sfm_cameras": sfm_cameras,
         "num_points": num_points,
         "num_images": num_images,
         "latest_snapshot": storage.public_url(pid, snaps[-1]) if snaps else None,
