@@ -9,7 +9,10 @@
 #     relay:16379 -> localhost:6379  (Redis)
 #     relay:19000 -> localhost:9000  (MinIO / S3)
 #
-# The session runs in a reconnect loop in the background (log: deploy/relay.log)
+# Each service gets its own SSH session, so a bulk MinIO transfer can't queue in
+# front of Temporal/Redis control traffic inside one shared connection (measured:
+# Redis connect+ping went from ~0.5s to 2.5-8.5s during a dataset download, and
+# boxes timed out). Each session runs in a reconnect loop in the background (log: deploy/relay.log)
 # and the box-facing addresses are written into deploy/.env as BOX_*. The relay
 # IP is static, so unlike ngrok these never change — re-running this script just
 # restarts the tunnel.
@@ -37,30 +40,31 @@ REDIS_PASSWORD="$(getenv REDIS_PASSWORD)"
   echo "!! GCP_RELAY_* not set — run deploy/gcp_relay_create.sh first" >&2; exit 1; }
 
 stop_tunnel() {
-  if [ -f "$PID_FILE" ]; then kill "$(cat "$PID_FILE")" 2>/dev/null || true; rm -f "$PID_FILE"; fi
+  if [ -f "$PID_FILE" ]; then kill $(cat "$PID_FILE") 2>/dev/null || true; rm -f "$PID_FILE"; fi
   pkill -f "ssh -N -i $KEY" 2>/dev/null || true
 }
 stop_tunnel
 if [ "${1:-}" = "stop" ]; then echo "relay tunnel stopped"; exit 0; fi
 
-# Reconnect loop. ExitOnForwardFailure makes ssh quit (and the loop retry) if the
-# relay still holds the ports from a dead session; the relay's sshd drops those
-# within ~45s (ClientAliveInterval 15 x 3).
-(
+# One reconnect loop per service. ExitOnForwardFailure makes ssh quit (and the
+# loop retry) if the relay still holds the port from a dead session; the relay's
+# sshd drops those within ~45s (ClientAliveInterval 15 x 3).
+tunnel_loop() {  # $1 = relay port, $2 = local port
   while true; do
     ssh -N -i "$KEY" -o IdentitiesOnly=yes \
       -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" \
       -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes \
-      -R 0.0.0.0:17233:localhost:7233 \
-      -R 0.0.0.0:16379:localhost:6379 \
-      -R 0.0.0.0:19000:localhost:9000 \
-      "$RUSER@$HOST" || true
-    echo "$(date -u +%FT%TZ) tunnel down, reconnecting in 5s"
+      -R "0.0.0.0:$1:localhost:$2" "$RUSER@$HOST" || true
+    echo "$(date -u +%FT%TZ) tunnel $1->$2 down, reconnecting in 5s"
     sleep 5
   done
-) >>"$LOG_FILE" 2>&1 &
-echo $! > "$PID_FILE"
-echo "relay tunnel loop pid $(cat "$PID_FILE") — log: $LOG_FILE"
+}
+: > "$PID_FILE"
+for fwd in 17233:7233 16379:6379 19000:9000; do   # Temporal, Redis, MinIO
+  tunnel_loop "${fwd%%:*}" "${fwd##*:}" >>"$LOG_FILE" 2>&1 &
+  echo $! >> "$PID_FILE"
+done
+echo "relay tunnels up (loop pids $(tr '\n' ' ' < "$PID_FILE")) — log: $LOG_FILE"
 
 # Wait until the relay's public ports really lead back here (Redis answers PONG).
 python3 - "$HOST" "$REDIS_PASSWORD" <<'PY'
