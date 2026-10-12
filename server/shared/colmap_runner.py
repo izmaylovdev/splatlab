@@ -13,6 +13,7 @@ Output layout (under <project>/colmap/):
 """
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import subprocess
@@ -87,18 +88,55 @@ def run_colmap(
     return undist
 
 
+@functools.lru_cache(maxsize=None)
+def _cli_help(command: str) -> str:
+    proc = subprocess.run(["colmap", command, "-h"], capture_output=True, text=True)
+    return proc.stdout + proc.stderr
+
+
+def _gpu_args(command: str, section: str, legacy: str, use_gpu: bool) -> list[str]:
+    """The ``use_gpu`` flag for a COLMAP CLI command, in whichever spelling the
+    installed version accepts: 3.12+ renamed SiftExtraction/SiftMatching to
+    FeatureExtraction/FeatureMatching and rejects the old names outright. GPU is
+    only requested from a CUDA build — a CPU build (e.g. Homebrew) runs CPU."""
+    h = _cli_help(command)
+    name = section if f"--{section}.use_gpu" in h else legacy
+    gpu = use_gpu and "without CUDA" not in h
+    return [f"--{name}.use_gpu", "1" if gpu else "0"]
+
+
+def _largest_model(sparse: str) -> str:
+    """The sub-model with the most registered images. The mapper writes one
+    numbered model per disconnected piece of the scene, and 0 isn't necessarily
+    the biggest (matches the pycolmap path, which also keeps the largest)."""
+    from .colmap_io import read_model
+
+    best, best_n = os.path.join(sparse, "0"), -1
+    for d in sorted(os.listdir(sparse)):
+        path = os.path.join(sparse, d)
+        if not os.path.isdir(path):
+            continue
+        try:
+            n = len(read_model(path)[1])
+        except Exception:  # noqa: BLE001  (half-written model: skip it)
+            continue
+        if n > best_n:
+            best, best_n = path, n
+    return best
+
+
 def _run_cli(image_dir, db, sparse, undist, matcher, use_gpu, progress: ProgressCb):
-    gpu = "1" if use_gpu else "0"
     _run([
         "colmap", "feature_extractor",
         "--database_path", db, "--image_path", image_dir,
         "--ImageReader.camera_model", "OPENCV",
         "--ImageReader.single_camera", "1",
-        "--SiftExtraction.use_gpu", gpu,
+        *_gpu_args("feature_extractor", "FeatureExtraction", "SiftExtraction", use_gpu),
     ], progress, "features")
     matcher_cmd = "exhaustive_matcher" if matcher == "exhaustive" else "sequential_matcher"
     _run(["colmap", matcher_cmd, "--database_path", db,
-          "--SiftMatching.use_gpu", gpu], progress, "matching")
+          *_gpu_args(matcher_cmd, "FeatureMatching", "SiftMatching", use_gpu)],
+         progress, "matching")
     _run([
         "colmap", "mapper",
         "--database_path", db, "--image_path", image_dir,
@@ -107,7 +145,7 @@ def _run_cli(image_dir, db, sparse, undist, matcher, use_gpu, progress: Progress
     _run([
         "colmap", "image_undistorter",
         "--image_path", image_dir,
-        "--input_path", os.path.join(sparse, "0"),
+        "--input_path", _largest_model(sparse),
         "--output_path", undist,
         "--output_type", "COLMAP",
     ], progress, "undistort")
