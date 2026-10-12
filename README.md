@@ -142,56 +142,59 @@ bash deploy/run_worker.sh          # or, on a fresh vast.ai box: bash deploy/vas
 bash deploy/run_api.sh             # → http://localhost:8000
 ```
 
-### Automatic GPU rental (Vast.ai pool over ngrok)
+### Automatic GPU rental (Vast.ai pool over a GCP relay)
 
-This is the intended flow: develop locally on your Mac, and let the control plane
-**rent a GPU box on demand** for the COLMAP/training steps, then release it when
-idle. Your Mac sits behind carrier-grade NAT (a "static" IP that isn't routable
-inbound), so the box can't dial in directly — **ngrok** exposes your laptop-local
-Temporal / Redis / MinIO as public TCP addresses the box dials **out** to, so a
-run started from your Mac actually completes.
+This is the intended flow: develop locally on your Mac, run **SFM (COLMAP) on the
+Mac itself** (it is CPU-only), and let the control plane **rent a GPU box on
+demand** for training, then release it when idle. Your Mac sits behind
+carrier-grade NAT (a "static" IP that isn't routable inbound), so a box can't dial
+in directly. A tiny **Google Cloud relay VM** with a static IP bridges the gap:
+the Mac keeps an outbound SSH session to it with reverse port forwards, and boxes
+dial the relay's public ports, which lead back to the Mac's Temporal / Redis /
+MinIO.
 
 **One-time setup:**
 
-1. **ngrok** — install it and grab your authtoken:
-
-   ```bash
-   brew install ngrok
-   ```
-
-   Sign up at [ngrok.com](https://ngrok.com), copy *Your Authtoken*, and — because
-   TCP tunnels require it — add a card under *Billing* (the free tier stays free:
-   3 endpoints, 1 GB/mo transfer, which covers a small first run).
-
-2. **Fill in `deploy/.env`:**
+1. **Fill in `deploy/.env`:**
 
    ```ini
    VAST_API_KEY=…            # Vast.ai: Account → API
-   NGROK_AUTHTOKEN=…         # ngrok: Your Authtoken
    REDIS_PASSWORD=…          # any strong random string (Redis is internet-exposed)
    VAST_MAX_PRICE=0.60       # $/hr ceiling per box (optional)
    ```
+
+2. **Create the relay** (needs the `gcloud` CLI, logged in, and a GCP project with
+   billing; an `e2-micro` in us-central1/us-east1/us-west1 is free-tier eligible):
+
+   ```bash
+   GCP_PROJECT=<your-project-id> bash deploy/gcp_relay_create.sh
+   ```
+
+   This makes an SSH key (`~/.ssh/splatlab_relay`), a static IP, a firewall rule
+   and the VM, and records the relay in `deploy/.env` (`GCP_RELAY_*`).
 
 **Run it:**
 
 ```bash
 # 1. control plane
 docker compose -f deploy/docker-compose.yml up -d --build
-# 2. open the tunnels — discovers the ngrok addresses, writes BOX_* into .env
-bash deploy/ngrok_up.sh
-# 3. start the pool (now that BOX_* are set) and flip the kill-switch off
+# 2. SFM worker — runs COLMAP natively on the Mac (keep it running)
+bash deploy/run_sfm_worker.sh
+# 3. relay tunnel — connects to the relay, writes the box-facing BOX_* into .env
+bash deploy/gcp_tunnel_up.sh
+# 4. start the pool (now that BOX_* are set) and flip the kill-switch off
 SPLATLAB_POOL_PAUSED=0 docker compose -f deploy/docker-compose.yml --profile pool up -d pool
 ```
 
-Now start a run from the UI at http://localhost:8000. The pool rents a GPU box,
-the box dials back into your Mac over ngrok, runs COLMAP/training (streaming live
-telemetry to the browser), and is reaped once idle.
+Now start a run from the UI at http://localhost:8000: COLMAP runs on the Mac, you
+review the points (or tick *Auto-train after SFM*), then the pool rents a GPU box,
+the box dials back in through the relay, trains (streaming live telemetry to the
+browser), and is reaped once idle. Keep the Mac awake (`caffeinate -dims`).
 
-> **Free-tier addresses change** each time ngrok restarts. If you restart ngrok,
-> re-run `deploy/ngrok_up.sh` and `docker compose … up -d pool` to refresh the
-> box-facing addresses. A paid ngrok plan gives static addresses (set once). For
-> real datasets that exceed ngrok's 1 GB/mo, move artifacts to a public bucket
-> (e.g. Cloudflare R2) so only control traffic uses the tunnel.
+> The relay IP is static, so `BOX_*` never change; re-run `deploy/gcp_tunnel_up.sh`
+> only to restart the tunnel (`… stop` stops it). All box traffic crosses your home
+> uplink and is billed as GCP egress (~$0.085–0.12/GB) — raise *Snapshot every* to
+> cut the per-run `.ply` uploads.
 
 The **pool** ([`server/vast/pool.py`](server/vast/pool.py)) watches how many
 training workflows need a GPU and keeps the fleet sized to match — renting the

@@ -11,9 +11,9 @@
 #   bash deploy/vast_setup.sh --no-run       # set up + verify only
 #
 # The worker connects OUT to the control plane. When the control plane is a laptop
-# behind NAT (the default SplatLab flow), the box reaches it over ngrok: the Mac
-# runs deploy/ngrok_up.sh and TEMPORAL_ADDRESS / REDIS_URL / SPLATLAB_S3_ENDPOINT
-# point at the ngrok public addresses. The GPU pool forwards all of these
+# behind NAT (the default SplatLab flow), the box reaches it through the GCP relay:
+# the Mac runs deploy/gcp_tunnel_up.sh and TEMPORAL_ADDRESS / REDIS_URL /
+# SPLATLAB_S3_ENDPOINT point at the relay's public ports. The GPU pool forwards all of these
 # automatically — nothing tunnel-related needs installing on the box.
 #
 # Tunables (env vars):
@@ -49,7 +49,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
 # emit_stage <name>: best-effort boot progress to the control-plane Redis. The
-# first one that lands proves the box reached the Mac over ngrok with the right
+# first one that lands proves the box reached the Mac through the relay with the right
 # creds — the visibility we were missing when boxes hung in "booting".
 # No-op until the venv (with redis) is active; failures never abort the boot.
 emit_stage() {
@@ -120,9 +120,9 @@ if ! command -v python3 >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1 \
     libgl1 libgomp1 libglib2.0-0
 fi
 
-# Connectivity: the box reaches the (NAT'd, laptop-local) control plane over ngrok.
-# There is nothing to set up on the box — TEMPORAL_ADDRESS / REDIS_URL /
-# SPLATLAB_S3_ENDPOINT already point at the ngrok public addresses (forwarded by
+# Connectivity: the box reaches the (NAT'd, laptop-local) control plane through the
+# GCP relay. There is nothing to set up on the box — TEMPORAL_ADDRESS / REDIS_URL /
+# SPLATLAB_S3_ENDPOINT already point at the relay's public ports (forwarded by
 # the pool), and the worker just dials them OUT. The first emit_stage below is the
 # proof the box reached the Mac.
 
@@ -141,7 +141,7 @@ python -m pip install --upgrade pip
 
 echo "==> Installing server requirements"
 pip install -r requirements.txt
-# First Redis contact: if this lands, ngrok + creds + reachability all work.
+# First Redis contact: if this lands, relay + creds + reachability all work.
 emit_stage deps-installed
 
 echo "==> Installing CUDA PyTorch ($TORCH_VERSION / $TV_VERSION, $CUDA_TAG)"
