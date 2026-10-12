@@ -13,7 +13,12 @@ Two roles, selected by SPLATLAB_WORKER_ROLE:
            workflow survives every GPU box being reaped; it dispatches the GPU
            activities to the GPU queue itself. No GPU needed.
 
-  both     One process runs both of the above (co-located dev / single box). This
+  sfm      Polls the SFM queue (config.SFM_TASK_QUEUE) and runs COLMAP only. Runs
+           natively on the control-plane machine (deploy/run_sfm_worker.sh), one
+           job at a time by default (SPLATLAB_SFM_CONCURRENCY) — COLMAP already
+           uses every core.
+
+  both     One process runs all of the above (co-located dev / single box). This
            is the default, so existing single-box deployments keep working.
 
 Run:  python -m server.worker.main            # role from SPLATLAB_WORKER_ROLE (default: both)
@@ -47,6 +52,7 @@ from ..workflows.training import SplatTrainingWorkflow
 # GPU memory — not Temporal defaults — is the real concurrency limit. One or two
 # concurrent trainings per box; override with SPLATLAB_MAX_ACTIVITIES.
 MAX_ACTIVITIES = int(os.environ.get("SPLATLAB_MAX_ACTIVITIES", "2"))
+SFM_CONCURRENCY = int(os.environ.get("SPLATLAB_SFM_CONCURRENCY", "1"))
 
 ROLE = os.environ.get("SPLATLAB_WORKER_ROLE", "both").lower()
 # Set by the pool onstart on a rented box; enables registry reporting. Absent on
@@ -123,6 +129,17 @@ def _gpu_worker(client: Client) -> Worker:
     )
 
 
+def _sfm_worker(client: Client) -> Worker:
+    return Worker(
+        client,
+        task_queue=config.SFM_TASK_QUEUE,
+        activities=[run_colmap_activity],
+        max_concurrent_activities=SFM_CONCURRENCY,
+        default_heartbeat_throttle_interval=HEARTBEAT_THROTTLE,
+        max_heartbeat_throttle_interval=HEARTBEAT_THROTTLE,
+    )
+
+
 def _control_worker(client: Client) -> Worker:
     return Worker(
         client,
@@ -138,15 +155,20 @@ async def main() -> None:
     workers: list[Worker] = []
     if ROLE in ("gpu", "both"):
         workers.append(_gpu_worker(client))
+    if ROLE in ("sfm", "both"):
+        workers.append(_sfm_worker(client))
     if ROLE in ("control", "both"):
         workers.append(_control_worker(client))
     if not workers:
-        raise SystemExit(f"unknown SPLATLAB_WORKER_ROLE={ROLE!r} (want gpu|control|both)")
+        raise SystemExit(f"unknown SPLATLAB_WORKER_ROLE={ROLE!r} (want gpu|sfm|control|both)")
 
     box = f" box={BOX_ID}" if BOX_ID else ""
     print(f"SplatLab worker(s) role={ROLE} → {config.TEMPORAL_ADDRESS} "
-          f"gpu_queue={config.GPU_TASK_QUEUE} control_queue={config.CONTROL_TASK_QUEUE} "
-          f"storage={config.STORAGE_BACKEND} max_activities={MAX_ACTIVITIES}{box}")
+          f"gpu_queue={config.GPU_TASK_QUEUE} sfm_queue={config.SFM_TASK_QUEUE} "
+          f"control_queue={config.CONTROL_TASK_QUEUE} "
+          f"storage={config.STORAGE_BACKEND} "
+          + (f"sfm_concurrency={SFM_CONCURRENCY}" if ROLE == "sfm"
+             else f"max_activities={MAX_ACTIVITIES}") + box)
     await asyncio.gather(*(w.run() for w in workers))
 
 

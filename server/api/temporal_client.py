@@ -42,11 +42,11 @@ class AlreadyRunning(Exception):
 
 
 async def start_run(pid: str, cfg: dict[str, Any], run_id: str, phase: str) -> None:
-    """Start one pipeline phase ("sfm" or "train") for a project.
+    """Start a run for a project: "pipeline" (SFM -> review -> train) or "train"
+    (training only, from stored poses).
 
-    Both phases share the per-project workflow id, so the FAIL conflict policy
-    rejects a second *concurrent* run while allowing the next phase to reuse the
-    id once the previous one has completed (sfm completes -> train can start).
+    Runs share the per-project workflow id, so the FAIL conflict policy rejects
+    a second *concurrent* run while letting the id be reused once a run closes.
     """
     client = await get_client()
     try:
@@ -78,6 +78,26 @@ async def stop_training(pid: str) -> None:
         raise
     except Exception:
         return
+
+
+async def approve(pid: str, cfg: dict[str, Any]) -> None:
+    """Tell a pipeline run waiting on review to go ahead and train with cfg."""
+    client = await get_client()
+    await _handle(client, pid).signal("approve", cfg)
+
+
+async def close_review(pid: str, timeout: float = 15.0) -> None:
+    """End a pipeline run that is waiting on review and wait until it has
+    closed, so the project's workflow id is free for a new run."""
+    import asyncio
+
+    client = await get_client()
+    handle = _handle(client, pid)
+    await handle.signal("stop")
+    try:
+        await asyncio.wait_for(handle.result(), timeout)
+    except Exception:  # noqa: BLE001  (closed with any outcome is fine)
+        pass
 
 
 _TERMINAL = {

@@ -208,6 +208,9 @@
               <option value="sequential">sequential</option>
             </select>
           </div>
+          <div class="set" title="Start training as soon as SFM finishes, without waiting for you to review the points">
+            <span>Auto-train after SFM</span><input id="cfgAuto" type="checkbox" style="justify-self:end">
+          </div>
         </div>
       </div>
 
@@ -607,6 +610,7 @@ async function selectProject(pid) {
   $('cfgSh').value = c.sh_degree;
   $('cfgSide').value = c.max_image_side;
   $('cfgMatcher').value = c.colmap_matcher;
+  $('cfgAuto').checked = !!c.auto_train;
   lossPts = []; psnrPts = [];
   $('stStep').textContent = $('stGauss').textContent =
     $('stLoss').textContent = $('stPsnr').textContent = '–';
@@ -679,7 +683,10 @@ function handleEvent(m) {
       $('stageDetail').textContent =
         `${(m.num_points || 0).toLocaleString()} points · ${m.num_images || 0} images`;
       loadSnapshot(m.url, 'SFM points — review, then Train');
-      toast('SFM done — review the points, then click Train');
+      // An auto-train run goes straight on to training; otherwise it waits.
+      toast($('cfgAuto').checked
+        ? 'SFM done — training starts automatically'
+        : 'SFM done — review the points, then click Train');
       refreshProjects();
       break;
     case 'snapshot':
@@ -923,9 +930,11 @@ function readConfig() {
     sh_degree: +$('cfgSh').value,
     max_image_side: +$('cfgSide').value,
     colmap_matcher: $('cfgMatcher').value,
+    auto_train: $('cfgAuto').checked,
   };
 }
-// Step 1: extract camera poses + a reviewable sparse point cloud.
+// Step 1: start the pipeline — camera poses + a reviewable sparse point cloud,
+// then training once approved (or right away with "Auto-train after SFM").
 $('btnSfm').onclick = async () => {
   try {
     await api(`/api/projects/${current.id}/sfm`, {
@@ -936,7 +945,8 @@ $('btnSfm').onclick = async () => {
     toast('Running SFM — extracting camera poses…');
   } catch (e) { toast(e.message, true); }
 };
-// Step 2: train the splat (only once poses have been reviewed).
+// Step 2: approve training of the run waiting on review, or re-train from the
+// stored poses when no run is open.
 $('btnTrain').onclick = async () => {
   lossPts = []; psnrPts = [];
   scheduleCharts();

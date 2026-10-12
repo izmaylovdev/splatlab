@@ -4,7 +4,8 @@ Run on the control plane:  python -m server.vast.pool
 
 Every `POOL_RECONCILE_INTERVAL` seconds it computes:
 
-    demand   = number of training workflows currently needing a GPU
+    demand   = GPU-queue work: training activities waiting for a box, plus
+               activities running on boxes (COLMAP runs off-box, never counts)
                (open SplatTrainingWorkflow executions, via Temporal visibility)
     desired  = min(POOL_MAX_BOXES, ceil(demand / POOL_JOBS_PER_BOX))
 
@@ -32,6 +33,8 @@ import uuid
 
 import redis
 
+from temporalio.api.enums.v1 import PendingActivityState
+
 from .. import config
 from . import registry
 from .client import VastClient, VastError
@@ -44,6 +47,37 @@ def _log(msg: str) -> None:
 
 
 # ---- demand -----------------------------------------------------------------
+# Activities dispatched to the GPU queue. COLMAP is not one of them: it runs on the
+# control-plane machine (config.SFM_TASK_QUEUE), so an open SFM-phase workflow
+# must not rent a box.
+_GPU_ACTIVITIES = frozenset({"train_activity"})
+
+
+async def _gpu_demand(temporal, boxes: list[registry.Box]) -> int:
+    """GPU work right now = GPU activities still waiting for a box + activities
+    already running on boxes (the boxes' own reported in-flight counts).
+
+    Waiting work is read from each open workflow's pending activity rather than
+    the task queue's backlog stat: that stat still counts tasks of workflows that
+    were terminated or timed out until a poller discards them, which would rent
+    boxes for work that no longer exists. Falls back to the open-workflow count
+    (over-rents, never under-rents) if Temporal can't be described.
+    """
+    query = f"ExecutionStatus='Running' AND WorkflowType='{WORKFLOW_TYPE}'"
+    try:
+        waiting = 0
+        async for wf in temporal.list_workflows(query):
+            desc = await temporal.get_workflow_handle(wf.id, run_id=wf.run_id).describe()
+            for pa in desc.raw_description.pending_activities:
+                if (pa.activity_type.name in _GPU_ACTIVITIES and pa.state
+                        == PendingActivityState.PENDING_ACTIVITY_STATE_SCHEDULED):
+                    waiting += 1
+    except Exception as e:
+        _log(f"WARN could not read pending activities: {e!r}; using open-workflow count")
+        return await _open_workflow_count(temporal)
+    return waiting + sum(b.active_count for b in boxes)
+
+
 async def _open_workflow_count(temporal) -> int:
     """How many training workflows are open (Running) right now."""
     query = f"ExecutionStatus='Running' AND WorkflowType='{WORKFLOW_TYPE}'"
@@ -63,13 +97,14 @@ async def _open_workflow_count(temporal) -> int:
 
 
 # ---- box bootstrap ----------------------------------------------------------
-# A rented box reaches the (laptop-local) control plane over ngrok: the Mac runs
-# `deploy/ngrok_up.sh`, which exposes Temporal/Redis/MinIO as public TCP addresses
-# and writes them into deploy/.env as BOX_*. The box dials those addresses OUT
-# (nothing to install on the box, no TUN). So the addresses forwarded to the box
-# are DIFFERENT from the ones the pool itself uses (the pool talks to
-# Temporal/Redis by their in-compose service names). The box-facing values come
-# from the BOX_* env vars, each falling back to the pool's own setting when unset.
+# A rented box reaches the (laptop-local) control plane through a GCP relay VM:
+# the Mac runs `deploy/gcp_tunnel_up.sh`, which reverse-forwards Temporal/Redis/
+# MinIO to the relay's public ports and writes them into deploy/.env as BOX_*.
+# The box dials those addresses OUT (nothing to install on the box, no TUN). So
+# the addresses forwarded to the box are DIFFERENT from the ones the pool itself
+# uses (the pool talks to Temporal/Redis by their in-compose service names). The
+# box-facing values come from the BOX_* env vars, each falling back to the pool's
+# own setting when unset.
 #
 # Env forwarded verbatim (creds + bootstrap tunables — same value for pool & box).
 _FORWARD_ENV = (
@@ -88,7 +123,7 @@ def _box_env(box_id: str) -> dict[str, str]:
 
     # Box-facing addresses: prefer the explicit BOX_* override, else the pool's
     # own value. In the Docker stack the pool connects via service names but sets
-    # BOX_* to the Mac's ngrok public addresses (see deploy/docker-compose.yml).
+    # BOX_* to the GCP relay's public ports (see deploy/docker-compose.yml).
     def _box_addr(box_key: str, own: str) -> str:
         return os.environ.get(box_key) or own
 
@@ -244,7 +279,7 @@ class Pool:
         await self._reap_orphans(known_ids)
 
         # 3. Compute demand -> desired.
-        demand = await _open_workflow_count(self.temporal)
+        demand = await _gpu_demand(self.temporal, survivors)
         if config.POOL_PAUSED:
             desired = 0
         else:

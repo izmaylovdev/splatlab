@@ -32,6 +32,8 @@ class TrainConfig:
     grow_grad2d: float = 0.0002
     # camera pose stage
     colmap_matcher: str = "auto"       # auto | exhaustive | sequential
+    # pipeline: go straight from SFM into training instead of pausing for review
+    auto_train: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "TrainConfig":

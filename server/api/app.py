@@ -86,6 +86,7 @@ async def _view(pid: str, meta: dict | None = None) -> dict:
         "poses_ready": poses_ready,
         "sfm_points": sfm_points,
         "sfm_cameras": sfm_cameras,
+        "awaiting_approval": bool(live and live.get("awaiting_approval")),
         "num_points": num_points,
         "num_images": num_images,
         "latest_snapshot": storage.public_url(pid, snaps[-1]) if snaps else None,
@@ -203,11 +204,21 @@ async def clear_photos(pid: str):
 
 
 # ---- pipeline control (two phases: SFM, then training) ----------------------
-async def _start_phase(pid: str, body: dict | None, phase: str) -> None:
+def _save_config(pid: str, body: dict | None) -> dict:
     meta = _meta_or_404(pid)
     cfg = metamod.merge_config(meta, (body or {}).get("config"))
     meta["config"] = cfg
     storage.write_meta(pid, meta)
+    return cfg
+
+
+async def _awaiting_review(pid: str) -> bool:
+    live = await tc.query_state(pid)
+    return bool(live and live.get("awaiting_approval"))
+
+
+async def _start_phase(pid: str, body: dict | None, phase: str) -> None:
+    cfg = _save_config(pid, body)
     try:
         await tc.start_run(pid, cfg, run_id=uuid.uuid4().hex, phase=phase)
     except tc.AlreadyRunning as e:
@@ -216,21 +227,28 @@ async def _start_phase(pid: str, body: dict | None, phase: str) -> None:
 
 @app.post("/api/projects/{pid}/sfm")
 async def start_sfm(pid: str, body: dict | None = None):
-    """Phase 1: run COLMAP to extract camera poses + the reviewable point cloud."""
+    """Start the pipeline: COLMAP -> review (unless auto_train) -> train, as one
+    run. Re-running while an earlier run waits on review replaces that run."""
     _meta_or_404(pid)
     if storage.num_photos(pid) < 3:
         raise HTTPException(409, "Upload at least 3 photos first")
-    await _start_phase(pid, body, phase="sfm")
+    if await _awaiting_review(pid):
+        await tc.close_review(pid)
+    await _start_phase(pid, body, phase="pipeline")
     return await _view(pid)
 
 
 @app.post("/api/projects/{pid}/train")
 async def start_training(pid: str, body: dict | None = None):
-    """Phase 2: train the splat. Requires the SFM points to exist (reviewed)."""
+    """Train the splat. Approves the open pipeline run if it is waiting on review;
+    otherwise starts a training-only run from the stored poses (re-train)."""
     _meta_or_404(pid)
     if not storage.artifact_exists(pid, SFM_POINTS_REL):
         raise HTTPException(409, "Run SFM first, then review the points")
-    await _start_phase(pid, body, phase="train")
+    if await _awaiting_review(pid):
+        await tc.approve(pid, _save_config(pid, body))
+    else:
+        await _start_phase(pid, body, phase="train")
     return await _view(pid)
 
 

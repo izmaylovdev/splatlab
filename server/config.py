@@ -26,6 +26,12 @@ TEMPORAL_NAMESPACE = _env("TEMPORAL_NAMESPACE", "default")
 # (SPLATLAB_TASK_QUEUE still points a worker at the GPU queue).
 GPU_TASK_QUEUE = _env("SPLATLAB_TASK_QUEUE", "splat-gpu")
 CONTROL_TASK_QUEUE = _env("SPLATLAB_CONTROL_QUEUE", "splat-control")
+# SFM_TASK_QUEUE: COLMAP runs here, on the control-plane machine itself. COLMAP
+# is CPU-only in our builds (pycolmap from PyPI has no CUDA), so renting a GPU box
+# for it only pays GPU rates for CPU work. Served by a native `sfm` worker
+# (deploy/run_sfm_worker.sh): pycolmap has no linux-arm64 wheel, so it cannot run
+# inside Docker on an Apple-silicon Mac.
+SFM_TASK_QUEUE = _env("SPLATLAB_SFM_QUEUE", "splat-sfm")
 TASK_QUEUE = GPU_TASK_QUEUE  # legacy alias
 
 # ---- Redis (live telemetry bus) --------------------------------------------

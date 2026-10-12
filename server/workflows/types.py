@@ -13,12 +13,15 @@ from typing import Any
 class TrainParams:
     """Input to SplatTrainingWorkflow.
 
-    ``phase`` selects which half of the pipeline this run executes:
-      "sfm"   — run COLMAP, publish the reviewable sparse point cloud, then
-                COMPLETE (releasing the GPU box while the user reviews).
-      "train" — assume poses are ready (from a prior sfm run) and run training.
-    Same workflow id per project, so the two phases run sequentially, never at
-    once, and the id is reusable once a phase completes.
+    ``phase`` selects what this run executes:
+      "pipeline" — COLMAP, then (unless config["auto_train"]) wait for the user
+                   to approve the reviewed points, then train. One run end to end.
+      "train"    — assume poses are ready (from an earlier run) and train only;
+                   used to re-train with new settings without redoing SFM.
+      "sfm"      — legacy: COLMAP only, then complete. Kept so runs started
+                   before "pipeline" existed replay unchanged.
+    Same workflow id per project, so runs never overlap and the id is reusable
+    once a run completes.
     """
     project_id: str
     config: dict[str, Any] = field(default_factory=dict)
