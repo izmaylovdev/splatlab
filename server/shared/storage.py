@@ -202,6 +202,7 @@ class S3Storage(Storage):
 
     def __init__(self):
         import boto3  # lazy: API/worker only import when this backend is chosen
+        from boto3.s3.transfer import TransferConfig
         from botocore.client import Config as BotoConfig
 
         self.bucket = config.S3_BUCKET
@@ -212,8 +213,14 @@ class S3Storage(Storage):
             region_name=config.S3_REGION,
             aws_access_key_id=config.S3_ACCESS_KEY,
             aws_secret_access_key=config.S3_SECRET_KEY,
-            config=BotoConfig(signature_version="s3v4"),
+            config=BotoConfig(signature_version="s3v4",
+                              connect_timeout=30,
+                              read_timeout=config.S3_READ_TIMEOUT,
+                              retries={"max_attempts": 8, "mode": "standard"}),
         )
+        # Used for every upload/download: see config.S3_TRANSFER_CONCURRENCY.
+        self._xfer = TransferConfig(max_concurrency=config.S3_TRANSFER_CONCURRENCY,
+                                    multipart_chunksize=16 * 1024 * 1024)
         # A second client bound to the browser-reachable endpoint, used only to
         # mint presigned URLs (the internal endpoint may be unreachable outside).
         self._public = boto3.client(
@@ -286,7 +293,8 @@ class S3Storage(Storage):
 
     # photos
     def save_photo(self, pid: str, name: str, src: BinaryIO) -> None:
-        self._client.upload_fileobj(src, self.bucket, self._key(pid, f"photos/{name}"))
+        self._client.upload_fileobj(src, self.bucket, self._key(pid, f"photos/{name}"),
+                                    Config=self._xfer)
 
     def photo_exists(self, pid: str, name: str) -> bool:
         try:
@@ -312,13 +320,14 @@ class S3Storage(Storage):
         for name in self.list_photos(pid):
             local = os.path.join(dest, name)
             if not os.path.exists(local):
-                self._client.download_file(self.bucket, self._key(pid, f"photos/{name}"), local)
+                self._client.download_file(self.bucket, self._key(pid, f"photos/{name}"), local,
+                                           Config=self._xfer)
         return dest
 
     # artifacts
     def upload_artifact(self, pid: str, rel: str) -> None:
         local = os.path.join(self.project_dir(pid), rel)
-        self._client.upload_file(local, self.bucket, self._key(pid, rel))
+        self._client.upload_file(local, self.bucket, self._key(pid, rel), Config=self._xfer)
 
     def upload_dir(self, pid: str, rel: str) -> None:
         base = os.path.join(self.project_dir(pid), rel)
@@ -328,7 +337,8 @@ class S3Storage(Storage):
             for name in files:
                 local = os.path.join(root, name)
                 sub = os.path.relpath(local, self.project_dir(pid)).replace(os.sep, "/")
-                self._client.upload_file(local, self.bucket, self._key(pid, sub))
+                self._client.upload_file(local, self.bucket, self._key(pid, sub),
+                                         Config=self._xfer)
 
     def ensure_dir_local(self, pid: str, rel: str) -> str:
         dest = os.path.join(self.project_dir(pid), rel)
@@ -337,7 +347,7 @@ class S3Storage(Storage):
             local = os.path.join(self.project_dir(pid), key[len(pid) + 1:])
             if not os.path.exists(local):
                 os.makedirs(os.path.dirname(local), exist_ok=True)
-                self._client.download_file(self.bucket, key, local)
+                self._client.download_file(self.bucket, key, local, Config=self._xfer)
         return dest
 
     def list_snapshots(self, pid: str) -> list[str]:

@@ -66,6 +66,12 @@ S3_REGION = _env("SPLATLAB_S3_REGION", "us-east-1")
 S3_ACCESS_KEY = os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("SPLATLAB_S3_ACCESS_KEY")
 S3_SECRET_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY") or os.environ.get("SPLATLAB_S3_SECRET_KEY")
 S3_PRESIGN_TTL = int(_env("SPLATLAB_S3_PRESIGN_TTL", "3600"))
+# Transfer tuning for a GPU box that reaches MinIO through the GCP relay and the
+# home uplink (~1 MB/s, shared by every box). boto3's defaults — 10 parallel
+# multipart streams, 60s read timeout — made each part crawl past the timeout
+# and failed a training mid-run. Fewer streams, longer timeout, more retries.
+S3_READ_TIMEOUT = float(_env("SPLATLAB_S3_TIMEOUT", "300"))
+S3_TRANSFER_CONCURRENCY = int(_env("SPLATLAB_S3_CONCURRENCY", "2"))
 
 WORKFLOW_ID_PREFIX = "train-"
 

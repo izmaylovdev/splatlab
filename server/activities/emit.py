@@ -35,7 +35,15 @@ def make_redis_emitter(pid: str, run_id: str) -> EmitFn:
             wire = frame_to_wire(msg)
         elif t in ("snapshot", "done") and "path" in msg:
             rel = os.path.relpath(msg["path"], proj_dir).replace(os.sep, "/")
-            storage.upload_artifact(pid, rel)               # no-op on local disk
+            try:
+                storage.upload_artifact(pid, rel)           # no-op on local disk
+            except Exception as e:  # noqa: BLE001
+                if t == "done":
+                    raise                                   # the result itself
+                # An intermediate preview snapshot: skip it, keep training.
+                print(f"[emit] snapshot upload failed for {pid} ({rel}): "
+                      f"{type(e).__name__}: {e}", flush=True)
+                return
             wire = {k: v for k, v in msg.items() if k != "path"}
             wire["url"] = storage.public_url(pid, rel)
         else:
@@ -50,8 +58,8 @@ def make_redis_emitter(pid: str, run_id: str) -> EmitFn:
             pipe.expire(history_key(pid), config.HISTORY_TTL_SECONDS)
         # Live telemetry is best-effort: a slow or briefly unreachable Redis (the
         # box reaches it over a tunnel) must not kill a training run — or mask
-        # the real error when the activity reports a failure. Artifact uploads
-        # above still raise: those are the results, not telemetry.
+        # the real error when the activity reports a failure. The final ("done")
+        # artifact upload above still raises: that's the result, not telemetry.
         try:
             pipe.execute()
         except redis.RedisError as e:
