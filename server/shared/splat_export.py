@@ -55,6 +55,42 @@ def export_ply(
         f.write(data.tobytes())
 
 
+def load_ply(path: str) -> dict[str, np.ndarray]:
+    """Read back a file written by ``export_ply``, in the trainer's raw
+    parameter space: log scales, logit opacities, wxyz quats, SH as [N,1,3] and
+    [N,K,3]. Used to resume training from a snapshot."""
+    with open(path, "rb") as f:
+        props, n = [], 0
+        while True:
+            line = f.readline().decode("ascii").strip()
+            if line.startswith("element vertex"):
+                n = int(line.split()[-1])
+            elif line.startswith("property float"):
+                props.append(line.split()[-1])
+            elif line.startswith("property"):
+                raise ValueError(f"unsupported ply property: {line}")
+            elif line == "end_header":
+                break
+        data = np.frombuffer(f.read(n * len(props) * 4), dtype="<f4")
+    data = data.reshape(n, len(props))
+    col = {p: i for i, p in enumerate(props)}
+
+    def take(*names: str) -> np.ndarray:
+        return np.stack([data[:, col[p]] for p in names], 1)
+
+    n_rest = sum(p.startswith("f_rest_") for p in props)
+    shN = take(*(f"f_rest_{i}" for i in range(n_rest))) if n_rest else np.zeros((n, 0))
+    return {
+        "means": take("x", "y", "z"),
+        "scales": take("scale_0", "scale_1", "scale_2"),
+        "quats": take("rot_0", "rot_1", "rot_2", "rot_3"),
+        "opacities": data[:, col["opacity"]].copy(),
+        "sh0": take("f_dc_0", "f_dc_1", "f_dc_2")[:, None, :],
+        # undo the Inria [R..., G..., B...] layout -> [N,K,3]
+        "shN": shN.reshape(n, 3, n_rest // 3).transpose(0, 2, 1),
+    }
+
+
 def rgb_to_sh0(rgb: np.ndarray) -> np.ndarray:
     """[0,1] RGB → DC SH coefficient."""
     return (rgb - 0.5) / SH_C0

@@ -23,7 +23,8 @@ from fastapi.staticfiles import StaticFiles
 from .. import config
 from ..shared.constants import (IMAGE_EXTS, SFM_CAMERAS_REL, SFM_META_REL,
                                SFM_POINTS_REL, VIDEO_EXTS)
-from ..shared.storage import get_storage
+from ..shared.storage import get_storage, snapshot_step
+from ..shared.train_common import TrainConfig
 from . import meta as metamod
 from . import temporal_client as tc
 from . import ws as wsmod
@@ -67,13 +68,23 @@ async def _view(pid: str, meta: dict | None = None) -> dict:
     num_points = int(sfm_live.get("num_points") or sfm_meta.get("num_points") or 0)
     num_images = int(sfm_live.get("num_images") or sfm_meta.get("num_images") or 0)
 
+    cfg = (live.get("config") if live and live.get("config") else meta.get("config", {}))
+    # Snapshots short of max_steps mean training was cut off (error, stop,
+    # lost box): show that as "stopped at step N", which Resume continues.
+    trained_step = snapshot_step(snaps[-1]) if snaps else 0
+    max_steps = int(cfg.get("max_steps") or TrainConfig.max_steps)
+    partial = 0 < trained_step < max_steps
+
     # Live workflow status wins when a run is open (or queryable); otherwise infer
     # from artifacts: trained (snapshots) > poses-ready (points) > stored meta.
-    resting = ("done" if snaps else "poses_ready" if poses_ready
-               else meta.get("status", "new"))
+    resting = ("stopped" if partial else "done" if snaps else
+               "poses_ready" if poses_ready else meta.get("status", "new"))
     status = live["status"] if live else resting
+    if partial and status in ("error", "stopped", "done"):
+        status = "stopped"
     stage = live["stage"] if live else None
-    cfg = (live.get("config") if live and live.get("config") else meta.get("config", {}))
+    # Busy but not yet picked up: queued for the SFM worker or a GPU box.
+    waiting = await tc.waiting_activity(pid) if status in BUSY else None
     return {
         "id": pid,
         "name": meta.get("name", ""),
@@ -89,6 +100,12 @@ async def _view(pid: str, meta: dict | None = None) -> dict:
         "awaiting_approval": bool(live and live.get("awaiting_approval")),
         "num_points": num_points,
         "num_images": num_images,
+        "waiting": waiting,
+        "trained_step": trained_step,
+        "max_steps": max_steps,
+        "can_resume": partial and status == "stopped",
+        # Finished runs can keep training past their target (raise Iterations).
+        "can_extend": status == "done" and trained_step > 0,
         "latest_snapshot": storage.public_url(pid, snaps[-1]) if snaps else None,
         "snapshots": [storage.public_url(pid, s) for s in snaps],
     }
@@ -115,7 +132,13 @@ async def list_projects():
     metas = [storage.read_meta(pid) for pid in storage.list_project_ids()]
     metas = [m for m in metas if m]
     metas.sort(key=lambda m: -m.get("created", 0))
-    return [await _view(m["id"], m) for m in metas]
+    views = [await _view(m["id"], m) for m in metas]
+    # Place in line for the one-at-a-time SFM worker (1 = next up).
+    sfm_line = sorted((v for v in views if (v["waiting"] or {}).get("activity") == "colmap"),
+                      key=lambda v: v["waiting"]["since"])
+    for i, v in enumerate(sfm_line, 1):
+        v["waiting"]["position"] = i
+    return views
 
 
 @app.post("/api/projects")
@@ -217,10 +240,13 @@ async def _awaiting_review(pid: str) -> bool:
     return bool(live and live.get("awaiting_approval"))
 
 
-async def _start_phase(pid: str, body: dict | None, phase: str) -> None:
+async def _start_phase(pid: str, body: dict | None, phase: str,
+                       resume: bool = False, run_extra: dict | None = None) -> None:
     cfg = _save_config(pid, body)
     try:
-        await tc.start_run(pid, cfg, run_id=uuid.uuid4().hex, phase=phase)
+        # run_extra: per-run hints for the trainer, not saved as project settings
+        await tc.start_run(pid, {**cfg, **(run_extra or {})}, run_id=uuid.uuid4().hex,
+                           phase=phase, resume=resume)
     except tc.AlreadyRunning as e:
         raise HTTPException(409, "A run is already in progress for this project") from e
 
@@ -249,6 +275,26 @@ async def start_training(pid: str, body: dict | None = None):
         await tc.approve(pid, _save_config(pid, body))
     else:
         await _start_phase(pid, body, phase="train")
+    return await _view(pid)
+
+
+@app.post("/api/projects/{pid}/resume")
+async def resume_training(pid: str, body: dict | None = None):
+    """Continue training from the latest snapshot (new run, same project; the
+    step count carries on): a cut-off run up to its target, or a finished one
+    past it, up to a raised Iterations."""
+    view = await _view(pid)
+    if not (view["can_resume"] or view["can_extend"]):
+        raise HTTPException(409, "Nothing to continue — train the project first")
+    target = int(((body or {}).get("config") or {}).get("max_steps") or view["max_steps"])
+    if target <= view["trained_step"]:
+        raise HTTPException(
+            409, f"Already trained {view['trained_step']:,} steps — "
+                 "raise Iterations above that to continue")
+    # The target the snapshot was trained toward, so the LR schedule continues
+    # smoothly when Iterations was raised.
+    await _start_phase(pid, body, phase="train", resume=True,
+                       run_extra={"resume_prev_max": view["max_steps"]})
     return await _view(pid)
 
 

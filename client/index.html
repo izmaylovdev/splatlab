@@ -49,6 +49,17 @@
   .proj:hover { background: var(--panel2); }
   .proj.active { background: var(--panel2); border-color: var(--accent); }
   .proj .pname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* state dot: pulsing = working, steady = resting */
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+         margin-right: 7px; vertical-align: 1px; background: var(--muted); }
+  .dot.training { background: var(--accent2); animation: dotpulse 1.4s ease-in-out infinite; }
+  .dot.poses { background: var(--warn); animation: dotpulse 1.4s ease-in-out infinite; }
+  .dot.ready { background: var(--accent); }
+  .dot.done { background: var(--accent2); }
+  .dot.stopped { background: transparent; box-shadow: inset 0 0 0 2px #fb923c; }
+  .dot.error { background: var(--danger); }
+  .dot.queued { animation: none; opacity: .35; }   /* busy, but not picked up yet */
+  @keyframes dotpulse { 50% { opacity: .3; } }
   .proj .pmeta { font-size: 12px; color: var(--muted); }
   #newProj { margin: 10px; }
   /* ---------- main ---------- */
@@ -68,6 +79,7 @@
   .badge.poses { color: var(--warn); border-color: var(--warn); }
   .badge.ready { color: var(--accent); border-color: var(--accent); }
   .badge.error { color: var(--danger); border-color: var(--danger); }
+  .badge.stopped { color: var(--warn); border-color: var(--warn); }
   #stageDetail { font-size: 12px; color: var(--muted); max-width: 340px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #topbar .spacer { flex: 1; }
@@ -116,10 +128,16 @@
   }
   #viewerTag { position: absolute; top: 10px; left: 12px; z-index: 3; font-size: 12px;
     color: var(--muted); background: rgba(14,17,22,.7); padding: 3px 9px; border-radius: 999px; }
-  #camToggle { position: absolute; top: 8px; right: 12px; z-index: 3; font-size: 12px;
+  #viewerTools { position: absolute; top: 8px; right: 12px; z-index: 3; display: flex; gap: 6px; }
+  #viewerTools button { font-size: 12px;
     color: var(--muted); background: rgba(14,17,22,.7); padding: 3px 10px; border-radius: 999px;
     border: 1px solid transparent; cursor: pointer; }
+  #viewerTools button:hover { color: var(--text, #e6edf3); }
   #camToggle.on { color: var(--text, #e6edf3); border-color: rgba(255,255,255,.25); }
+  #viewerCard:fullscreen, #viewerCard.maximized { background: var(--bg); border-radius: 0; }
+  #viewerCard:fullscreen #viewer3d, #viewerCard.maximized #viewer3d { border-radius: 0; }
+  /* fallback when the browser refuses real fullscreen: fill the window */
+  #viewerCard.maximized { position: fixed; inset: 0; z-index: 50; margin: 0; border: 0; }
   /* bottom row */
   #bottomRow { display: grid; grid-template-columns: 300px 1fr 1fr; gap: 10px; min-height: 0; }
   #liveImg { width: 100%; height: 100%; object-fit: contain; background: #000;
@@ -159,6 +177,7 @@
       <span class="spacer"></span>
       <button id="btnSfm" class="primary">① Run SFM</button>
       <button id="btnTrain">② Train</button>
+      <button id="btnResume" style="display:none">▶ Resume</button>
       <button id="btnStop" style="display:none">■ Stop</button>
       <button id="btnExport">Export .ply</button>
       <button id="btnDelete" class="danger">Delete</button>
@@ -216,7 +235,10 @@
 
       <div class="card" id="viewerCard">
         <div id="viewerTag">3D viewer</div>
-        <button id="camToggle" style="display:none" title="Show/hide the registered camera poses">Cameras</button>
+        <div id="viewerTools">
+          <button id="camToggle" style="display:none" title="Show/hide the registered camera poses">Cameras</button>
+          <button id="btnFullscreen" title="Fullscreen (F) — Esc to exit">⛶ Fullscreen</button>
+        </div>
         <div id="viewer3d"></div>
         <div id="viewerOverlay">The interactive splat viewer appears here<br>after the first snapshot</div>
       </div>
@@ -468,6 +490,40 @@ $('camToggle').onclick = () => {
   updateCamToggle();
 };
 
+// Fullscreen the 3D preview (the whole card, so its tag and buttons come along).
+// If the browser refuses (no user gesture, embedded frame), fill the window instead.
+function isFullscreen() {
+  return !!document.fullscreenElement || $('viewerCard').classList.contains('maximized');
+}
+function setMaximized(on) {
+  $('viewerCard').classList.toggle('maximized', on);
+  updateFullscreenBtn();
+}
+function updateFullscreenBtn() {
+  $('btnFullscreen').textContent = isFullscreen() ? '✕ Exit fullscreen' : '⛶ Fullscreen';
+}
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else if ($('viewerCard').classList.contains('maximized')) setMaximized(false);
+  else if ($('viewerCard').requestFullscreen)
+    $('viewerCard').requestFullscreen().catch(() => setMaximized(true));
+  else setMaximized(true);
+}
+$('btnFullscreen').onclick = toggleFullscreen;
+document.addEventListener('fullscreenchange', updateFullscreenBtn);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('viewerCard').classList.contains('maximized')) {
+    setMaximized(false);
+    return;
+  }
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
+  if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey && (e.key === 'f' || e.key === 'F')
+      && current && $('proj').style.display !== 'none') {
+    e.preventDefault();
+    toggleFullscreen();
+  }
+});
+
 async function loadSnapshot(url, tag) {
   lastSnapshotUrl = url;
   loadSnapshot._tag = tag;
@@ -548,13 +604,45 @@ async function refreshProjects(selectId) {
   for (const p of projects) {
     const el = document.createElement('div');
     el.className = 'proj' + (current && current.id === p.id ? ' active' : '');
-    el.innerHTML = `<div class="pname"></div><div class="pmeta"></div>`;
-    el.querySelector('.pname').textContent = p.name;
-    el.querySelector('.pmeta').textContent = `${p.num_photos} photos · ${p.status}`;
+    el.innerHTML = `<div class="pname"><span class="dot"></span><span></span></div><div class="pmeta"></div>`;
+    const dot = el.querySelector('.dot');
+    dot.className = 'dot ' + dotClass(p.status) + (p.waiting ? ' queued' : '');
+    dot.title = statusText(p.status, p);
+    el.querySelector('.pname span:last-child').textContent = p.name;
+    el.querySelector('.pmeta').textContent = `${p.num_photos} photos · ${statusText(p.status, p)}`;
     el.onclick = () => selectProject(p.id);
     list.appendChild(el);
   }
   if (selectId) selectProject(selectId);
+}
+
+// Queued-not-running info; the list view carries the SFM line position.
+function waitingOf(p) {
+  if (!p.waiting) return null;
+  const listed = projects.find(x => x.id === p.id);
+  return (listed && listed.waiting) || p.waiting;
+}
+
+// Colour of a project's state dot in the list.
+function dotClass(status) {
+  return status === 'training' ? 'training'
+    : status === 'processing_poses' || status === 'queued' ? 'poses'
+    : status === 'poses_ready' ? 'ready'
+    : status === 'done' ? 'done'
+    : status === 'stopped' ? 'stopped'
+    : status === 'error' ? 'error' : 'new';
+}
+
+// Training cut off part-way (error, stop, lost box) reads as the step it got to.
+function statusText(status, p) {
+  const w = p && waitingOf(p);
+  if (w && (status === 'processing_poses' || status === 'queued' || status === 'training'))
+    return w.activity === 'colmap'
+      ? `queued for COLMAP${w.position ? ' · #' + w.position : ''}`
+      : 'waiting for a GPU';
+  if (status === 'stopped' && p && p.trained_step)
+    return `iters: ${p.trained_step.toLocaleString()} (stopped)`;
+  return status === 'poses_ready' ? 'poses ready' : status;
 }
 
 // Drive the two-step controls + status badge off the current status and whether
@@ -562,16 +650,19 @@ async function refreshProjects(selectId) {
 // steps: run SFM → review the extracted points → train.
 function updateControls(status) {
   const b = $('pStatus');
-  b.textContent = status === 'poses_ready' ? 'poses ready' : status;
+  b.textContent = statusText(status, current);
   b.className = 'badge' +
     (status === 'training' ? ' training'
       : status === 'processing_poses' || status === 'queued' ? ' poses'
       : status === 'poses_ready' ? ' ready'
+      : status === 'stopped' ? ' stopped'
       : status === 'error' ? ' error' : '');
 
   const running = status === 'queued' || status === 'processing_poses' || status === 'training';
   const trained = !!(current && current.snapshots && current.snapshots.length) || status === 'done';
   const posesReady = !!(current && current.poses_ready) || status === 'poses_ready' || trained;
+  const canResume = !running && !!(current && current.can_resume) && status === 'stopped';
+  const canExtend = !running && !!(current && current.can_extend) && status === 'done';
 
   $('btnStop').style.display = running ? '' : 'none';
   $('btnSfm').style.display = running ? 'none' : '';
@@ -582,7 +673,27 @@ function updateControls(status) {
   $('btnSfm').classList.toggle('primary', !posesReady);
   $('btnTrain').textContent = trained ? '② Re-train' : '② Train';
   $('btnTrain').disabled = !posesReady;
-  $('btnTrain').classList.toggle('primary', posesReady);
+  $('btnTrain').classList.toggle('primary', posesReady && !canResume);
+  $('btnResume').style.display = canResume || canExtend ? '' : 'none';
+  $('btnResume').classList.toggle('primary', canResume);
+  $('btnResume').textContent = canExtend ? '▶ Train more' : '▶ Resume';
+  $('btnResume').title = canExtend
+    ? 'Keep training from the finished result, up to Iterations'
+    : 'Continue from the last snapshot';
+}
+
+// Re-read the project's resting status (e.g. after `done`/`error`: a run cut
+// off part-way shows as stopped at its last snapshot, with Resume).
+async function refreshCurrent() {
+  if (!current) return;
+  const p = await api('/api/projects/' + current.id);
+  if (!current || current.id !== p.id) return;
+  Object.assign(current, { trained_step: p.trained_step, can_resume: p.can_resume,
+                           can_extend: p.can_extend, snapshots: p.snapshots });
+  updateControls(p.status);
+  if (p.status === 'stopped' && p.trained_step)
+    $('stageDetail').textContent = `stopped at step ${p.trained_step.toLocaleString()}` +
+      ` of ${p.max_steps.toLocaleString()} — Resume continues from there`;
 }
 
 function showViewerOverlay(text) {
@@ -648,9 +759,19 @@ function handleEvent(m) {
       // Carry the durable poses/snapshot facts onto `current` so the controls
       // reflect them across reconnects.
       if (current) { current.poses_ready = p.poses_ready; current.sfm_points = p.sfm_points;
-                     current.sfm_cameras = p.sfm_cameras; current.snapshots = p.snapshots; }
+                     current.sfm_cameras = p.sfm_cameras; current.snapshots = p.snapshots;
+                     current.trained_step = p.trained_step; current.can_resume = p.can_resume;
+                     current.can_extend = p.can_extend;
+                     // keep the list's SFM line position (single-project views lack it)
+                     current.waiting = p.waiting && { ...current.waiting, ...p.waiting }; }
       updateControls(p.status);
       if (p.stage) $('stageDetail').textContent = `${p.stage.stage}: ${p.stage.detail}`;
+      if (p.waiting) $('stageDetail').textContent = p.waiting.activity === 'colmap'
+        ? 'waiting for the SFM worker (one project at a time)'
+        : 'waiting for a GPU box to pick it up';
+      if (p.status === 'stopped' && p.trained_step)
+        $('stageDetail').textContent = `stopped at step ${p.trained_step.toLocaleString()}` +
+          ` of ${p.max_steps.toLocaleString()} — Resume continues from there`;
       for (const h of m.history) pushProgress(h, true);
       scheduleCharts();
       // Viewer shows the training result if any, else the SFM points to review.
@@ -663,6 +784,8 @@ function handleEvent(m) {
       break;
     }
     case 'status':
+      // A worker reporting in means the run left the queue.
+      if (current && current.waiting) { current.waiting = null; refreshProjects(); }
       $('stageDetail').textContent = `${m.stage}: ${m.detail || ''}`;
       if (['features', 'matching', 'mapping', 'undistort', 'review'].includes(m.stage)) {
         updateControls('processing_poses');
@@ -699,12 +822,16 @@ function handleEvent(m) {
       if (m.url) loadSnapshot(m.url);
       toast('Training finished 🎉');
       refreshProjects();
+      refreshCurrent();
       break;
     case 'error':
       updateControls('error');
       $('stageDetail').textContent = m.message;
       toast(m.message, true);
       refreshProjects();
+      // The run's state settles a moment after the event; then a cut-off run
+      // reads as "stopped at step N" with Resume.
+      setTimeout(refreshCurrent, 3000);
       break;
   }
 }
@@ -744,7 +871,7 @@ function setUploadBar(frac, indeterminate) {
 }
 function setUploadBusy(busy) {
   uploading = busy;
-  for (const id of ['btnFiles', 'btnVideo', 'btnClearPhotos', 'btnSfm', 'btnTrain']) $(id).disabled = busy;
+  for (const id of ['btnFiles', 'btnVideo', 'btnClearPhotos', 'btnSfm', 'btnTrain', 'btnResume']) $(id).disabled = busy;
   $('drop').style.pointerEvents = busy ? 'none' : '';
   if (!busy) {
     $('uploadBar').classList.remove('show', 'indeterminate');
@@ -958,6 +1085,23 @@ $('btnTrain').onclick = async () => {
     toast('Training started…');
   } catch (e) { toast(e.message, true); }
 };
+// Continue training from the latest snapshot: a cut-off run up to Iterations,
+// or a finished one past it (Iterations is raised if it's already reached).
+$('btnResume').onclick = async () => {
+  const done = current.trained_step || 0;
+  if (+$('cfgSteps').value <= done) {
+    $('cfgSteps').value = done + 10000;
+    toast(`Iterations raised to ${(done + 10000).toLocaleString()} — edit it to train longer or shorter`);
+  }
+  try {
+    await api(`/api/projects/${current.id}/resume`, {
+      method: 'POST', body: JSON.stringify({ config: readConfig() }),
+    });
+    current.can_resume = current.can_extend = false;
+    updateControls('training');
+    toast(`Training on from step ${done.toLocaleString()}…`);
+  } catch (e) { toast(e.message, true); }
+};
 $('btnStop').onclick = async () => {
   await api(`/api/projects/${current.id}/stop`, { method: 'POST' });
   toast('Stopping…');
@@ -995,6 +1139,8 @@ $('npName').onkeydown = (e) => { if (e.key === 'Enter') $('npCreate').click(); }
   } catch (e) { /* ignore */ }
   await refreshProjects();
   if (projects.length) selectProject(projects[0].id);
+  // Keep the list's state dots current (other projects have no open socket).
+  setInterval(() => { if (!document.hidden) refreshProjects().catch(() => {}); }, 15000);
 })();
 </script>
 </body>

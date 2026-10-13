@@ -15,8 +15,9 @@ sharing the per-project id so they run sequentially and the id is reusable:
               and run training only, re-materializing that dataset on whatever
               box picks the job up. Used to re-train with new settings.
 
-  "sfm"       legacy: COLMAP, then COMPLETE. Runs started before "pipeline"
-              existed replay through it unchanged.
+  "sfm"       legacy, from before "pipeline" existed: COLMAP, then the same
+              review -> train flow. Runs that completed right after COLMAP
+              replay through it unchanged (patch "legacy-sfm-joins-pipeline").
 
 Thin and deterministic: it only sequences activities, tracks coarse status/stage
 for the query API, and reacts to a `stop` signal. All filesystem / CUDA /
@@ -113,7 +114,7 @@ class SplatTrainingWorkflow:
             if p.phase == "pipeline":
                 return await self._run_pipeline(p)
             if p.phase == "sfm":
-                return await self._run_sfm(p)
+                return await self._run_legacy_sfm(p)
             return await self._run_train(p)
         except (asyncio.CancelledError, TemporalCancelledError):
             # workflow-level cancel, or the stop signal cancelling the handle
@@ -157,8 +158,20 @@ class SplatTrainingWorkflow:
                                  f"{colmap.num_images} images — review, then train"}
         return {"status": "poses_ready", **self._sfm}
 
+    async def _run_legacy_sfm(self, p: TrainParams) -> dict:
+        # "sfm" runs queued before "pipeline" existed: same COLMAP command, so
+        # runs still waiting on it can join the review -> train flow when it
+        # finishes. Runs that already completed replay with patched() == False.
+        colmap_done = await self._run_sfm(p)
+        if not workflow.patched("legacy-sfm-joins-pipeline"):
+            return colmap_done
+        return await self._review_then_train(p)
+
     async def _run_pipeline(self, p: TrainParams) -> dict:
         await self._run_sfm(p)
+        return await self._review_then_train(p)
+
+    async def _review_then_train(self, p: TrainParams) -> dict:
         if self._stop_requested:          # stop landed as COLMAP finished
             return self._end_review("closed without training")
         if not p.config.get("auto_train"):
@@ -194,7 +207,10 @@ class SplatTrainingWorkflow:
             train_activity,
             # Poses were produced by a prior sfm run and uploaded to this fixed
             # project-relative path; the activity re-materializes it locally.
-            TrainArgs(p.project_id, p.config, UNDISTORTED_REL, p.run_id),
+            # `resume` rides in the config dict, not as a TrainArgs field: boxes
+            # booted on older code reject unknown TrainArgs fields outright.
+            TrainArgs(p.project_id, {**p.config, "resume": True} if p.resume
+                      else p.config, UNDISTORTED_REL, p.run_id),
             task_queue=_GPU_QUEUE,
             schedule_to_start_timeout=_SCHEDULE_TO_START,
             start_to_close_timeout=timedelta(hours=12),

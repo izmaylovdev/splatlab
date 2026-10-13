@@ -13,7 +13,7 @@ import threading
 import numpy as np
 
 from .dataset import SplatDataset, load_image
-from .splat_export import export_ply
+from .splat_export import export_ply, load_ply
 from .train_common import EmitFn, TrainConfig
 
 
@@ -23,7 +23,17 @@ def train(
     cfg: TrainConfig,
     emit: EmitFn,
     stop: threading.Event,
+    resume_ply: str | None = None,
+    resume_step: int = 0,
+    resume_prev_max: int | None = None,
 ) -> None:
+    """Train from the SfM points, or — given ``resume_ply`` — continue a run
+    from its snapshot at ``resume_step``. A snapshot holds every gaussian
+    parameter exactly; Adam moments and densification stats start fresh (the
+    latter reset every refine interval anyway), and the LR schedule picks up at
+    ``resume_step`` of the run's earlier target ``resume_prev_max`` and decays
+    from there to its usual end value by ``cfg.max_steps`` — so continuing a
+    finished run past its target doesn't re-raise the position LR."""
     import torch
     import torch.nn.functional as F
     from gsplat import rasterization
@@ -39,36 +49,12 @@ def train(
     torch.manual_seed(42)
 
     emit({"type": "status", "stage": "init", "detail": "initializing gaussians"})
-
-    # ---- init gaussians from SfM points -------------------------------------
-    pts = torch.from_numpy(dataset.points).float()
-    rgb = torch.from_numpy(dataset.points_rgb).float() / 255.0
-    n = pts.shape[0]
-    if n < 100:
-        raise RuntimeError(f"Only {n} SfM points — reconstruction too sparse")
-
-    # scale init: mean distance to 3 nearest neighbours (chunked knn on GPU)
-    pts_gpu = pts.to(device)
-    dists = []
-    for i in range(0, n, 4096):
-        d = torch.cdist(pts_gpu[i:i + 4096], pts_gpu)          # [c, N]
-        knn = d.topk(4, largest=False).values[:, 1:]           # skip self
-        dists.append(knn.mean(1))
-    avg_d = torch.cat(dists).clamp_min(1e-7).cpu()
-
-    sh0 = ((rgb - 0.5) / 0.28209479177387814).unsqueeze(1)          # [N,1,3]
     n_rest = (cfg.sh_degree + 1) ** 2 - 1
-
-    params = torch.nn.ParameterDict({
-        "means": torch.nn.Parameter(pts),
-        "scales": torch.nn.Parameter(torch.log(avg_d)[:, None].repeat(1, 3)),
-        "quats": torch.nn.Parameter(
-            torch.cat([torch.ones(n, 1), torch.zeros(n, 3)], 1)),
-        "opacities": torch.nn.Parameter(
-            torch.logit(torch.full((n,), cfg.init_opacity))),
-        "sh0": torch.nn.Parameter(sh0),
-        "shN": torch.nn.Parameter(torch.zeros(n, n_rest, 3)),
-    }).to(device)
+    if resume_ply:
+        params = _params_from_snapshot(resume_ply, n_rest).to(device)
+    else:
+        params = _params_from_points(dataset, n_rest, cfg, device)
+    n = params["means"].shape[0]
 
     scene_scale = dataset.scene_scale
     lrs = {
@@ -84,8 +70,14 @@ def train(
                             eps=1e-15)
         for k in params
     }
-    means_sched = torch.optim.lr_scheduler.ExponentialLR(
-        optimizers["means"], gamma=0.01 ** (1.0 / cfg.max_steps))
+    # Position LR decays 100x over the run. A resumed run starts where the
+    # earlier schedule stopped (same as one unbroken run when the target is
+    # unchanged) and reaches the same end value by the new target.
+    done_frac = min(1.0, resume_step / (resume_prev_max or cfg.max_steps))
+    remaining = max(1, cfg.max_steps - resume_step)
+    means_gamma = (0.01 ** (1.0 - done_frac)) ** (1.0 / remaining)
+    optimizers["means"].param_groups[0]["lr"] = lrs["means"] * 0.01 ** done_frac
+    means_sched = torch.optim.lr_scheduler.ExponentialLR(optimizers["means"], gamma=means_gamma)
 
     strategy = DefaultStrategy(
         refine_start_iter=cfg.refine_start,
@@ -175,10 +167,13 @@ def train(
         return path
 
     # ---- loop ---------------------------------------------------------------
-    emit({"type": "status", "stage": "training", "detail": f"{n} initial gaussians"})
+    emit({"type": "status", "stage": "training",
+          "detail": (f"resumed at step {resume_step} with {n} gaussians" if resume_ply
+                     else f"{n} initial gaussians")})
     perm = np.random.permutation(len(dataset))
     ptr = 0
-    for step in range(1, cfg.max_steps + 1):
+    step = resume_step
+    for step in range(resume_step + 1, cfg.max_steps + 1):
         if stop.is_set():
             break
         if ptr >= len(perm):
@@ -231,3 +226,52 @@ def train(
     _t.save({k: v.detach().cpu() for k, v in params.items()},
             os.path.join(out_dir, "checkpoint.pt"))
     emit({"type": "done", "step": final_step, "path": path})
+
+
+def _params_from_points(dataset: SplatDataset, n_rest: int, cfg: TrainConfig, device: str):
+    import torch
+
+    pts = torch.from_numpy(dataset.points).float()
+    rgb = torch.from_numpy(dataset.points_rgb).float() / 255.0
+    n = pts.shape[0]
+    if n < 100:
+        raise RuntimeError(f"Only {n} SfM points — reconstruction too sparse")
+
+    # scale init: mean distance to 3 nearest neighbours (chunked knn on GPU)
+    pts_gpu = pts.to(device)
+    dists = []
+    for i in range(0, n, 4096):
+        d = torch.cdist(pts_gpu[i:i + 4096], pts_gpu)          # [c, N]
+        knn = d.topk(4, largest=False).values[:, 1:]           # skip self
+        dists.append(knn.mean(1))
+    avg_d = torch.cat(dists).clamp_min(1e-7).cpu()
+
+    sh0 = ((rgb - 0.5) / 0.28209479177387814).unsqueeze(1)          # [N,1,3]
+    return torch.nn.ParameterDict({
+        "means": torch.nn.Parameter(pts),
+        "scales": torch.nn.Parameter(torch.log(avg_d)[:, None].repeat(1, 3)),
+        "quats": torch.nn.Parameter(
+            torch.cat([torch.ones(n, 1), torch.zeros(n, 3)], 1)),
+        "opacities": torch.nn.Parameter(
+            torch.logit(torch.full((n,), cfg.init_opacity))),
+        "sh0": torch.nn.Parameter(sh0),
+        "shN": torch.nn.Parameter(torch.zeros(n, n_rest, 3)),
+    }).to(device)
+
+
+
+def _params_from_snapshot(path: str, n_rest: int):
+    import torch
+
+    g = load_ply(path)
+    shN = g["shN"]
+    if shN.shape[1] != n_rest:          # sh_degree changed since the snapshot
+        fit = np.zeros((shN.shape[0], n_rest, 3), dtype=np.float32)
+        k = min(n_rest, shN.shape[1])
+        fit[:, :k] = shN[:, :k]
+        shN = fit
+    g["shN"] = shN
+    return torch.nn.ParameterDict({
+        k: torch.nn.Parameter(torch.from_numpy(np.ascontiguousarray(v, dtype=np.float32)))
+        for k, v in g.items()
+    })

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from temporalio.client import Client, WorkflowHandle
+from temporalio.api.enums.v1 import PendingActivityState
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -41,9 +42,11 @@ class AlreadyRunning(Exception):
     """A training workflow for this project is already running."""
 
 
-async def start_run(pid: str, cfg: dict[str, Any], run_id: str, phase: str) -> None:
+async def start_run(pid: str, cfg: dict[str, Any], run_id: str, phase: str,
+                    resume: bool = False) -> None:
     """Start a run for a project: "pipeline" (SFM -> review -> train) or "train"
-    (training only, from stored poses).
+    (training only, from stored poses; ``resume`` continues from the latest
+    snapshot instead of starting over).
 
     Runs share the per-project workflow id, so the FAIL conflict policy rejects
     a second *concurrent* run while letting the id be reused once a run closes.
@@ -52,7 +55,8 @@ async def start_run(pid: str, cfg: dict[str, Any], run_id: str, phase: str) -> N
     try:
         await client.start_workflow(
             WORKFLOW_TYPE,
-            TrainParams(project_id=pid, config=cfg, run_id=run_id, phase=phase),
+            TrainParams(project_id=pid, config=cfg, run_id=run_id, phase=phase,
+                        resume=resume),
             id=config.workflow_id(pid),
             # Workflow runs on the always-on control plane; it dispatches the
             # GPU activities to the pool-managed GPU queue itself.
@@ -136,3 +140,21 @@ async def query_state(pid: str) -> dict[str, Any] | None:
             return None
     except Exception:
         return None
+
+
+async def waiting_activity(pid: str) -> dict[str, Any] | None:
+    """The open run's activity if it is queued but not yet picked up by a
+    worker — {"activity": "colmap"|"train", "since": epoch seconds} — else None
+    (running, idle, no run, or Temporal unreachable). Lets the UI tell a project
+    waiting for the SFM worker / a GPU box from one actually running."""
+    try:
+        client = await get_client()
+        desc = await _handle(client, pid).describe()
+    except Exception:
+        return None
+    for a in desc.raw_description.pending_activities:
+        if a.state == PendingActivityState.PENDING_ACTIVITY_STATE_SCHEDULED:
+            name = a.activity_type.name
+            return {"activity": "colmap" if "colmap" in name else "train",
+                    "since": a.scheduled_time.seconds}
+    return None

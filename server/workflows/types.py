@@ -18,8 +18,9 @@ class TrainParams:
                    to approve the reviewed points, then train. One run end to end.
       "train"    — assume poses are ready (from an earlier run) and train only;
                    used to re-train with new settings without redoing SFM.
-      "sfm"      — legacy: COLMAP only, then complete. Kept so runs started
-                   before "pipeline" existed replay unchanged.
+      "sfm"      — legacy, from before "pipeline" existed: COLMAP, then the
+                   same review -> train flow (runs that completed after COLMAP
+                   alone replay unchanged).
     Same workflow id per project, so runs never overlap and the id is reusable
     once a run completes.
     """
@@ -27,6 +28,7 @@ class TrainParams:
     config: dict[str, Any] = field(default_factory=dict)
     run_id: str = ""
     phase: str = "sfm"
+    resume: bool = False      # "train" only: continue from the latest snapshot
 
 
 @dataclass

@@ -2,8 +2,9 @@
 
 Validates: workflow imports pass the sandbox, activity wiring/args, the `state`
 query at each stage, the pipeline run (sfm -> review -> approve -> train, with
-settings changed at approval; stop during review; auto_train), the legacy split
-phases (sfm -> poses_ready, then train -> done), and a `stop` signal cancelling
+settings changed at approval; stop during review; auto_train), a legacy sfm run
+joining review -> train, a train-only re-run and a
+resume, and a `stop` signal cancelling
 the running training activity -> 'stopped'. No GPU/Redis/COLMAP involved.
 
     .venv/bin/python -m tests.test_workflow_e2e
@@ -29,10 +30,14 @@ async def stub_colmap(a: ColmapArgs) -> ColmapResult:
                         num_points=1234, num_images=12)
 
 
+seen_resume: list[bool] = []    # happy_path: the resume flag per train call
+
+
 @activity.defn(name="train_activity")
 async def stub_train(a: TrainArgs) -> TrainResult:
     # final_step echoes the config the activity received, so tests can check
     # which settings reached training
+    seen_resume.append(bool(a.config.get("resume")))
     return TrainResult(final_step=a.config.get("max_steps", 1500),
                        snapshot_uri="/files/x/snapshots/step_001500.ply")
 
@@ -104,20 +109,23 @@ async def pipeline_paths(client: Client):
 
 
 async def happy_path(client: Client):
+    seen_resume.clear()
     async with _sfm_worker(client), Worker(
             client, task_queue=TASK_QUEUE, workflows=[SplatTrainingWorkflow],
             activities=[stub_train]):
-        # Phase 1: SFM completes at poses_ready (GPU released for review).
+        # Legacy "sfm" run: joins the pipeline — review, approve, train.
         h = await client.start_workflow(
             SplatTrainingWorkflow.run,
             TrainParams(project_id="p1", config={"colmap_matcher": "auto"},
                         run_id="r1", phase="sfm"),
             id=workflow_id("p1"), task_queue=TASK_QUEUE)
-        sfm = await h.result()
-        assert sfm["status"] == "poses_ready", sfm
-        assert sfm["num_points"] == 1234 and sfm["num_images"] == 12, sfm
+        sfm = await _until(h, lambda s: s["awaiting_approval"], "review wait")
+        assert sfm["sfm"]["num_points"] == 1234 and sfm["sfm"]["num_images"] == 12, sfm
+        await h.signal(SplatTrainingWorkflow.approve, {})
+        result = await asyncio.wait_for(h.result(), timeout=20)
+        assert result["status"] == "done", result
 
-        # Phase 2: same workflow id is reusable once the sfm run has closed.
+        # Re-train: same workflow id is reusable once the run has closed.
         h = await client.start_workflow(
             SplatTrainingWorkflow.run,
             TrainParams(project_id="p1", config={}, run_id="r1b", phase="train"),
@@ -125,7 +133,16 @@ async def happy_path(client: Client):
         result = await h.result()
         assert result["status"] == "done", result
         assert result["final_step"] == 1500, result
-        print("happy path:", sfm, result)
+
+        # Resume: the flag reaches the activity inside its config dict.
+        h = await client.start_workflow(
+            SplatTrainingWorkflow.run,
+            TrainParams(project_id="p1", config={"max_steps": 3000}, run_id="r1c",
+                        phase="train", resume=True),
+            id=workflow_id("p1"), task_queue=TASK_QUEUE)
+        result = await h.result()
+        assert result["final_step"] == 3000 and seen_resume == [False, False, True], seen_resume
+        print("happy path:", result, flush=True)
 
 
 async def stop_path(client: Client):

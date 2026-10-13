@@ -30,6 +30,14 @@ from .constants import IMAGE_EXTS
 SNAP_PREFIX = "snapshots/"
 
 
+def snapshot_step(rel: str) -> int:
+    """'snapshots/step_000500.ply' -> 500 (0 if the name doesn't parse)."""
+    try:
+        return int(rel.rsplit("step_", 1)[1].split(".")[0])
+    except (IndexError, ValueError):
+        return 0
+
+
 class Storage:
     """Interface. See module docstring for the key layout."""
 
@@ -75,6 +83,15 @@ class Storage:
 
     def list_snapshots(self, pid: str) -> list[str]:
         """Sorted rel paths like 'snapshots/step_000500.ply'."""
+        ...
+
+    def clear_snapshots(self, pid: str) -> None:
+        """Drop every snapshot, so a fresh training run never mixes with an
+        earlier run's steps (resume reads the latest one)."""
+        ...
+
+    def ensure_file_local(self, pid: str, rel: str) -> str:
+        """Guarantee one stored artifact exists on local disk; return its path."""
         ...
 
     def public_url(self, pid: str, rel: str, download_name: str | None = None) -> str:
@@ -174,6 +191,12 @@ class LocalDiskStorage(Storage):
         if not os.path.isdir(d):
             return []
         return [SNAP_PREFIX + f for f in sorted(os.listdir(d)) if f.endswith(".ply")]
+
+    def clear_snapshots(self, pid: str) -> None:
+        shutil.rmtree(os.path.join(self._pdir(pid), "snapshots"), ignore_errors=True)
+
+    def ensure_file_local(self, pid: str, rel: str) -> str:
+        return os.path.join(self._pdir(pid), rel)
 
     def public_url(self, pid: str, rel: str, download_name: str | None = None) -> str:
         return f"/files/{pid}/{rel}"
@@ -354,6 +377,21 @@ class S3Storage(Storage):
         prefix = self._key(pid, SNAP_PREFIX)
         rels = [SNAP_PREFIX + k[len(prefix):] for k in self._list(prefix)]
         return sorted(r for r in rels if r.endswith(".ply"))
+
+    def clear_snapshots(self, pid: str) -> None:
+        keys = self._list(self._key(pid, SNAP_PREFIX))
+        for i in range(0, len(keys), 1000):
+            batch = [{"Key": k} for k in keys[i:i + 1000]]
+            self._client.delete_objects(Bucket=self.bucket, Delete={"Objects": batch})
+        shutil.rmtree(os.path.join(self.project_dir(pid), "snapshots"), ignore_errors=True)
+
+    def ensure_file_local(self, pid: str, rel: str) -> str:
+        local = os.path.join(self.project_dir(pid), rel)
+        if not os.path.exists(local):
+            os.makedirs(os.path.dirname(local), exist_ok=True)
+            self._client.download_file(self.bucket, self._key(pid, rel), local,
+                                       Config=self._xfer)
+        return local
 
     def public_url(self, pid: str, rel: str, download_name: str | None = None) -> str:
         params = {"Bucket": self.bucket, "Key": self._key(pid, rel)}

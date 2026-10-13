@@ -24,7 +24,7 @@ class TrainConfig:
     max_image_side: int = 1600
     # cadence
     frame_every: int = 20              # live-view render every N steps
-    snapshot_every: int = 500          # .ply snapshot every N steps
+    snapshot_every: int = 2500         # .ply snapshot every N steps (each one crosses the home uplink)
     # densification (gsplat DefaultStrategy)
     refine_start: int = 500
     refine_stop: int = 12000

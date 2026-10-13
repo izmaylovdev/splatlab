@@ -7,6 +7,9 @@ this activity's return value is only coarse bookkeeping for the workflow.
 Cancellation is cooperative and prompt: setting the `stop` event makes the
 trainer break its step loop, write a final snapshot, and emit `done`, so a /stop
 keeps the partially-trained result (matches the old UX).
+
+A fresh run first clears the project's snapshots; a resume run instead pulls the
+latest one down and continues training from its step.
 """
 from __future__ import annotations
 
@@ -14,18 +17,10 @@ import threading
 
 from temporalio import activity
 
-from ..shared.storage import get_storage
+from ..shared.storage import get_storage, snapshot_step
 from ..workflows.types import TrainArgs, TrainResult
 from .emit import make_redis_emitter
 from .runner import run_with_heartbeat
-
-
-def _final_step(snap_rel: str) -> int:
-    # "snapshots/step_000500.ply" -> 500
-    try:
-        return int(snap_rel.rsplit("step_", 1)[1].split(".")[0])
-    except (IndexError, ValueError):
-        return 0
 
 
 @activity.defn
@@ -45,7 +40,17 @@ async def train_activity(args: TrainArgs) -> TrainResult:
         # undistorted dataset down locally first (no-op on the local backend).
         undist = storage.ensure_dir_local(pid, args.undistorted_rel)
         ds = load_colmap_dataset(undist, cfg.max_image_side)
-        real_train(ds, storage.project_dir(pid), cfg, emit, stop)
+        resume_ply, resume_step = None, 0
+        resume = bool(args.config.get("resume"))
+        snaps = storage.list_snapshots(pid) if resume else []
+        if snaps:
+            resume_ply = storage.ensure_file_local(pid, snaps[-1])
+            resume_step = snapshot_step(snaps[-1])
+        elif not resume:
+            storage.clear_snapshots(pid)
+        real_train(ds, storage.project_dir(pid), cfg, emit, stop,
+                   resume_ply=resume_ply, resume_step=resume_step,
+                   resume_prev_max=args.config.get("resume_prev_max"))
 
     try:
         await run_with_heartbeat(blocking, stop, interval=10.0, wait_for_flush=True)
@@ -56,5 +61,5 @@ async def train_activity(args: TrainArgs) -> TrainResult:
     snaps = storage.list_snapshots(pid)
     if not snaps:
         return TrainResult(final_step=0, snapshot_uri=None)
-    return TrainResult(final_step=_final_step(snaps[-1]),
+    return TrainResult(final_step=snapshot_step(snaps[-1]),
                        snapshot_uri=storage.public_url(pid, snaps[-1]))
