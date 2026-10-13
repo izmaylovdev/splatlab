@@ -124,6 +124,21 @@ VAST_REPO_BRANCH = _env("VAST_REPO_BRANCH", "main")
 # carrying this label, so it can never destroy someone else's instance.
 VAST_LABEL = _env("VAST_LABEL", "splatlab-pool")
 
+# How a rented box reaches the control plane (Temporal / Redis / MinIO on this
+# NAT'd Mac, which nothing can dial into):
+#   ssh    the pool dials OUT to each box over SSH and reverse-forwards the three
+#          services onto the box's localhost (no middleman; nothing exposed)
+#   relay  the box dials the GCP relay VM's public ports (BOX_* addresses,
+#          written by deploy/gcp_tunnel_up.sh)
+BOX_LINK = _env("SPLATLAB_BOX_LINK", "ssh")
+# Private key the pool uses for those sessions; its public half is attached to
+# every rented box.
+BOX_SSH_KEY = _env("SPLATLAB_BOX_SSH_KEY", os.path.expanduser("~/.ssh/vast_ai"))
+BOX_SSH_USER = _env("SPLATLAB_BOX_SSH_USER", "root")
+# Where the pool itself reaches MinIO, to forward it (Temporal and Redis come from
+# TEMPORAL_ADDRESS / REDIS_URL).
+BOX_FORWARD_S3 = _env("SPLATLAB_BOX_FORWARD_S3", "localhost:9000")
+
 # Scaling knobs.
 POOL_MAX_BOXES = int(_env("SPLATLAB_POOL_MAX_BOXES", "3"))
 POOL_JOBS_PER_BOX = int(_env("SPLATLAB_POOL_JOBS_PER_BOX", "2"))  # match worker MAX_ACTIVITIES

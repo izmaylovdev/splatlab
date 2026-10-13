@@ -10,11 +10,12 @@
 #   bash deploy/vast_setup.sh                # set up, verify, then run the worker
 #   bash deploy/vast_setup.sh --no-run       # set up + verify only
 #
-# The worker connects OUT to the control plane. When the control plane is a laptop
-# behind NAT (the default SplatLab flow), the box reaches it through the GCP relay:
-# the Mac runs deploy/gcp_tunnel_up.sh and TEMPORAL_ADDRESS / REDIS_URL /
-# SPLATLAB_S3_ENDPOINT point at the relay's public ports. The GPU pool forwards all of these
-# automatically — nothing tunnel-related needs installing on the box.
+# The worker connects to the control plane. When that's a laptop behind NAT (the
+# default SplatLab flow), the GPU pool SSHes into this box and reverse-forwards
+# Temporal / Redis / MinIO onto its localhost (SPLATLAB_WAIT_FOR_LINK=1: wait for
+# that link before starting), or — with SPLATLAB_BOX_LINK=relay — the addresses
+# point at the GCP relay's public ports. The pool sets all of these; nothing
+# tunnel-related needs installing on the box.
 #
 # Tunables (env vars):
 #   TEMPORAL_ADDRESS  control-plane Temporal gRPC   (default localhost:7233)
@@ -48,12 +49,33 @@ GSPLAT_WHEEL="${GSPLAT_WHEEL:-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
+# wait_for_link: with the pool's SSH link, the control plane shows up on this
+# box's localhost only once the pool has connected in (seconds after sshd starts).
+LINK_READY=0
+wait_for_link() {
+  [ "${SPLATLAB_WAIT_FOR_LINK:-0}" = "1" ] && [ "$LINK_READY" = "0" ] || return 0
+  echo "==> Waiting for the control-plane SSH link (localhost:7233 / 6379 / 9000)"
+  local i
+  for i in $(seq 1 360); do        # up to 30 min; the pool's boot deadline is shorter
+    if (exec 3<>/dev/tcp/127.0.0.1/7233) 2>/dev/null \
+       && (exec 3<>/dev/tcp/127.0.0.1/6379) 2>/dev/null \
+       && (exec 3<>/dev/tcp/127.0.0.1/9000) 2>/dev/null; then
+      LINK_READY=1
+      echo "==> Control-plane link up"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "!! control-plane link never came up — starting anyway" >&2
+}
+
 # emit_stage <name>: best-effort boot progress to the control-plane Redis. The
 # first one that lands proves the box reached the Mac through the relay with the right
 # creds — the visibility we were missing when boxes hung in "booting".
 # No-op until the venv (with redis) is active; failures never abort the boot.
 emit_stage() {
   [ -n "${REDIS_URL:-}" ] || return 0
+  wait_for_link
   command -v python >/dev/null 2>&1 || return 0
   SPLATLAB_STAGE="$1" python - <<'PY' 2>/dev/null || true
 import os, time
@@ -92,6 +114,7 @@ if [ "${SPLATLAB_PREBAKED:-0}" = "1" ]; then
     if [ "$RUN_SERVER" = "1" ]; then
       echo "==> Starting SplatLab worker (Temporal=$TEMPORAL_ADDRESS, storage=$SPLATLAB_STORAGE)"
       emit_stage worker-starting
+      wait_for_link
       exec bash deploy/run_worker.sh
     fi
     echo "==> Setup complete (prebaked, --no-run)."
@@ -120,10 +143,9 @@ if ! command -v python3 >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1 \
     libgl1 libgomp1 libglib2.0-0
 fi
 
-# Connectivity: the box reaches the (NAT'd, laptop-local) control plane through the
-# GCP relay. There is nothing to set up on the box — TEMPORAL_ADDRESS / REDIS_URL /
-# SPLATLAB_S3_ENDPOINT already point at the relay's public ports (forwarded by
-# the pool), and the worker just dials them OUT. The first emit_stage below is the
+# Connectivity: nothing to set up on the box — the pool's SSH link (or the GCP
+# relay) carries the control plane, and TEMPORAL_ADDRESS / REDIS_URL /
+# SPLATLAB_S3_ENDPOINT already point at it. The first emit_stage below is the
 # proof the box reached the Mac.
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -178,6 +200,7 @@ if [ "$RUN_SERVER" = "1" ]; then
   echo "==> Starting SplatLab worker (Temporal=$TEMPORAL_ADDRESS, storage=$SPLATLAB_STORAGE)"
   echo "    Tip: run this inside 'tmux' so it survives disconnects."
   emit_stage worker-starting
+  wait_for_link
   exec bash deploy/run_worker.sh
 else
   echo

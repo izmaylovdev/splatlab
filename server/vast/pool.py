@@ -30,13 +30,14 @@ import asyncio
 import math
 import time
 import uuid
+from urllib.parse import urlsplit
 
 import redis
 
 from temporalio.api.enums.v1 import PendingActivityState
 
 from .. import config
-from . import registry
+from . import links, registry
 from .client import VastClient, VastError
 
 WORKFLOW_TYPE = "SplatTrainingWorkflow"
@@ -97,14 +98,15 @@ async def _open_workflow_count(temporal) -> int:
 
 
 # ---- box bootstrap ----------------------------------------------------------
-# A rented box reaches the (laptop-local) control plane through a GCP relay VM:
-# the Mac runs `deploy/gcp_tunnel_up.sh`, which reverse-forwards Temporal/Redis/
-# MinIO to the relay's public ports and writes them into deploy/.env as BOX_*.
-# The box dials those addresses OUT (nothing to install on the box, no TUN). So
-# the addresses forwarded to the box are DIFFERENT from the ones the pool itself
-# uses (the pool talks to Temporal/Redis by their in-compose service names). The
-# box-facing values come from the BOX_* env vars, each falling back to the pool's
-# own setting when unset.
+# A rented box can't dial the (NAT'd, laptop-local) control plane directly. Two
+# ways around it (config.BOX_LINK):
+#   ssh    the pool SSHes OUT to the box and reverse-forwards Temporal/Redis/MinIO
+#          onto the box's localhost (server/vast/links.py); the box uses localhost.
+#   relay  the Mac runs `deploy/gcp_tunnel_up.sh`, which reverse-forwards them to
+#          a GCP relay VM's public ports and writes those into deploy/.env as
+#          BOX_*; the box dials them OUT.
+# Either way the addresses forwarded to the box differ from the ones the pool
+# itself uses (in-compose service names).
 #
 # Env forwarded verbatim (creds + bootstrap tunables — same value for pool & box).
 _FORWARD_ENV = (
@@ -121,17 +123,25 @@ def _box_env(box_id: str) -> dict[str, str]:
     import os
     env = {k: os.environ[k] for k in _FORWARD_ENV if os.environ.get(k)}
 
-    # Box-facing addresses: prefer the explicit BOX_* override, else the pool's
-    # own value. In the Docker stack the pool connects via service names but sets
-    # BOX_* to the GCP relay's public ports (see deploy/docker-compose.yml).
-    def _box_addr(box_key: str, own: str) -> str:
-        return os.environ.get(box_key) or own
+    if config.BOX_LINK == "ssh":
+        # The pool's SSH links put the services on the box's own loopback.
+        r = urlsplit(config.REDIS_URL)
+        auth = r.netloc.rsplit("@", 1)[0] + "@" if "@" in r.netloc else ""
+        env["TEMPORAL_ADDRESS"] = f"localhost:{links.BOX_TEMPORAL_PORT}"
+        env["REDIS_URL"] = f"{r.scheme}://{auth}localhost:{links.BOX_REDIS_PORT}{r.path}"
+        env["SPLATLAB_S3_ENDPOINT"] = f"http://localhost:{links.BOX_S3_PORT}"
+        env["SPLATLAB_WAIT_FOR_LINK"] = "1"   # vast_setup.sh waits for the tunnel
+    else:
+        # Relay: the explicit BOX_* addresses, else the pool's own value.
+        def _box_addr(box_key: str, own: str) -> str:
+            return os.environ.get(box_key) or own
 
-    env["TEMPORAL_ADDRESS"] = _box_addr("BOX_TEMPORAL_ADDRESS", config.TEMPORAL_ADDRESS)
-    env["REDIS_URL"] = _box_addr("BOX_REDIS_URL", config.REDIS_URL)
-    s3_endpoint = os.environ.get("BOX_S3_ENDPOINT") or os.environ.get("SPLATLAB_S3_ENDPOINT")
-    if s3_endpoint:
-        env["SPLATLAB_S3_ENDPOINT"] = s3_endpoint
+        env["TEMPORAL_ADDRESS"] = _box_addr("BOX_TEMPORAL_ADDRESS", config.TEMPORAL_ADDRESS)
+        env["REDIS_URL"] = _box_addr("BOX_REDIS_URL", config.REDIS_URL)
+        s3_endpoint = (os.environ.get("BOX_S3_ENDPOINT")
+                       or os.environ.get("SPLATLAB_S3_ENDPOINT"))
+        if s3_endpoint:
+            env["SPLATLAB_S3_ENDPOINT"] = s3_endpoint
 
     # Non-negotiable: the box runs GPU activities only (the control plane owns the
     # workflow), polls the GPU queue, and reports under its box id.
@@ -174,9 +184,12 @@ class Pool:
         self.temporal = temporal
         self.vast = vast
         self.r = r
+        self.links = links.BoxLinks(vast) if config.BOX_LINK == "ssh" else None
 
     async def _destroy(self, box: registry.Box, reason: str) -> None:
         _log(f"destroy {box.box_id} (instance {box.instance_id}) — {reason}")
+        if self.links:
+            self.links.drop(box.box_id)
         if box.instance_id:
             try:
                 await self.vast.destroy_instance(box.instance_id)
@@ -275,6 +288,10 @@ class Pool:
             else:
                 survivors.append(b)
 
+        # Keep every live box's SSH link up (booting boxes need it to report in).
+        if self.links:
+            self.links.sync(survivors)
+
         # 2. Reap orphans not tracked in the registry at all.
         await self._reap_orphans(known_ids)
 
@@ -313,7 +330,8 @@ class Pool:
     async def run(self) -> None:
         _log(f"autoscaler up — queue={config.GPU_TASK_QUEUE} "
              f"max_boxes={config.POOL_MAX_BOXES} jobs/box={config.POOL_JOBS_PER_BOX} "
-             f"idle_timeout={config.POOL_IDLE_TIMEOUT}s price<=${config.VAST_MAX_PRICE}/hr"
+             f"idle_timeout={config.POOL_IDLE_TIMEOUT}s price<=${config.VAST_MAX_PRICE}/hr "
+             f"link={config.BOX_LINK}"
              + ("  [PAUSED — draining to zero]" if config.POOL_PAUSED else ""))
         while True:
             try:

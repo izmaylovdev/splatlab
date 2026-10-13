@@ -13,9 +13,10 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # System deps: pycolmap wheels + imageio-ffmpeg's bundled binary need libGL/glib
-# at runtime (the API's /video frame extraction imports imageio-ffmpeg).
+# at runtime (the API's /video frame extraction imports imageio-ffmpeg); the pool
+# needs an ssh client for its links to rented boxes.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 curl \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 curl openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python deps first for layer caching. The control-plane requirements
