@@ -131,8 +131,8 @@ VAST_LABEL = _env("VAST_LABEL", "splatlab-pool")
 #   relay  the box dials the GCP relay VM's public ports (BOX_* addresses,
 #          written by deploy/gcp_tunnel_up.sh)
 BOX_LINK = _env("SPLATLAB_BOX_LINK", "ssh")
-# Private key the pool uses for those sessions; its public half is attached to
-# every rented box.
+# Private key the pool uses for those sessions; its public half must be an SSH
+# key on the Vast account (installed on every new box).
 BOX_SSH_KEY = _env("SPLATLAB_BOX_SSH_KEY", os.path.expanduser("~/.ssh/vast_ai"))
 BOX_SSH_USER = _env("SPLATLAB_BOX_SSH_USER", "root")
 # Where the pool itself reaches MinIO, to forward it (Temporal and Redis come from

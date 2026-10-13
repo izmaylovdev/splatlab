@@ -18,8 +18,6 @@ deadline as usual.
 from __future__ import annotations
 
 import asyncio
-import os
-import subprocess
 import tempfile
 import time
 from typing import Any
@@ -34,6 +32,7 @@ BOX_REDIS_PORT = 6379
 BOX_S3_PORT = 9000
 
 _RETRY_DELAY = 5          # seconds between reconnect attempts
+_LOOKUP_EVERY = 20        # min seconds between Vast lookups per box (API rate limit)
 _UP_AFTER = 8             # an ssh still running after this long counts as "up"
 
 
@@ -74,15 +73,6 @@ def ssh_endpoint(inst: dict[str, Any]) -> tuple[str, int, str] | None:
     return None
 
 
-def public_key() -> str:
-    """The OpenSSH public half of BOX_SSH_KEY (attached to every box)."""
-    pub = config.BOX_SSH_KEY + ".pub"
-    if os.path.exists(pub):
-        return open(pub).read().strip()
-    return subprocess.run(["ssh-keygen", "-y", "-f", config.BOX_SSH_KEY],
-                          check=True, capture_output=True, text=True).stdout.strip()
-
-
 class BoxLinks:
     """Keeps the SSH sessions of every live box running; the pool calls `sync`
     each reconcile and `drop` when it destroys a box."""
@@ -90,7 +80,10 @@ class BoxLinks:
     def __init__(self, vast: VastClient) -> None:
         self.vast = vast
         self._tasks: dict[str, asyncio.Task] = {}
-        self._pubkey = public_key()
+        # per box: last known ssh endpoint + when it was looked up (shared by the
+        # box's sessions, so a box costs one Vast API call per _LOOKUP_EVERY)
+        self._endpoints: dict[str, tuple[tuple[str, int, str] | None, float]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         self._known_hosts = tempfile.mkdtemp(prefix="splatlab-known-hosts-")
 
     def sync(self, boxes: list[Any]) -> None:
@@ -108,31 +101,51 @@ class BoxLinks:
         t = self._tasks.pop(box_id, None)
         if t:
             t.cancel()
+        self._endpoints.pop(box_id, None)
+        self._locks.pop(box_id, None)
+
+    async def _endpoint(self, box_id: str, instance_id: int,
+                        refresh: bool) -> tuple[str, int, str] | None:
+        """The box's ssh endpoint, looked up at most once per _LOOKUP_EVERY.
+        `refresh` asks for a new lookup (e.g. after a failed connect)."""
+        async with self._locks.setdefault(box_id, asyncio.Lock()):
+            ep, at = self._endpoints.get(box_id, (None, 0.0))
+            wait = at + _LOOKUP_EVERY - time.monotonic()
+            if ep and (not refresh or wait > 0):   # cached, or refreshed just now
+                return ep
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                inst = await self.vast.get_instance(instance_id)
+                ep = ssh_endpoint(inst or {}) or None
+            except VastError as e:
+                _log(f"{box_id}: instance lookup failed: {str(e)[:160]}")
+            self._endpoints[box_id] = (ep, time.monotonic())
+            return ep
 
     async def _run(self, box_id: str, instance_id: int) -> None:
-        # The key can only be attached once the instance exists; retry until it sticks.
-        while True:
-            try:
-                await self.vast.attach_ssh_key(instance_id, self._pubkey)
-                break
-            except VastError as e:
-                _log(f"{box_id}: attach ssh key failed, retrying: {e}")
-                await asyncio.sleep(15)
+        # BOX_SSH_KEY must be registered on the Vast account: Vast installs account
+        # keys on every new box. (Attaching it per instance via the API instead
+        # coincided with the box's sshd dropping all sessions and refusing more.)
         await asyncio.gather(*(self._session(box_id, instance_id, name, fwds)
                                for name, fwds in _sessions().items()))
+
+    async def _vast_status(self, instance_id: int) -> str:
+        try:
+            inst = await self.vast.get_instance(instance_id) or {}
+        except VastError as e:
+            return f"lookup failed: {e}"
+        return (f"{inst.get('actual_status')}/{inst.get('intended_status')}: "
+                f"{str(inst.get('status_msg') or '').strip()[:160]}")
 
     async def _session(self, box_id: str, instance_id: int, name: str,
                        forwards: list[str]) -> None:
         fails = 0                            # consecutive failed attempts
         while True:
-            try:
-                inst = await self.vast.get_instance(instance_id)
-            except VastError as e:
-                _log(f"{box_id}/{name}: instance lookup failed: {e}")
-                inst = None
-            ep = ssh_endpoint(inst or {})
+            # Re-look up the endpoint only after repeated failures (it rarely changes).
+            ep = await self._endpoint(box_id, instance_id, refresh=fails >= 3)
             if not ep:                       # still loading / no ssh yet
-                await asyncio.sleep(10)
+                fails = max(fails, 3)
                 continue
             host, port, kind = ep
             started = time.monotonic()
@@ -174,5 +187,5 @@ class BoxLinks:
             # and then only every 10th, not every few seconds.
             if fails <= 1 or fails % 10 == 0:
                 _log(f"{box_id}/{name}: {'down after %.0fs' % lived if not fails else 'connect failed'}"
-                     f" via {kind} ({last[:160]}) — retrying")
+                     f" via {kind} ({last[:160]}) — retrying; vast says {await self._vast_status(instance_id)}")
             await asyncio.sleep(_RETRY_DELAY)

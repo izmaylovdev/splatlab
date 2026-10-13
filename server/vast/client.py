@@ -172,9 +172,5 @@ class VastClient:
         inst = body.get("instances") if isinstance(body, dict) else None
         return inst if isinstance(inst, dict) else None
 
-    async def attach_ssh_key(self, instance_id: int, pubkey: str) -> None:
-        await self._request("POST", f"/instances/{instance_id}/ssh/",
-                            json={"ssh_key": pubkey})
-
     async def destroy_instance(self, instance_id: int) -> None:
         await self._request("DELETE", f"/instances/{instance_id}/")

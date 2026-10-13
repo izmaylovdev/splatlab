@@ -217,9 +217,9 @@ services:
       # actually reach this Mac (connectivity set up). Set to 0 to go live.
       SPLATLAB_POOL_PAUSED: ${SPLATLAB_POOL_PAUSED:-1}
     volumes:
-      # SSH key for the box links (its .pub is attached to every rented box).
+      # SSH key for the box links. Its public half must be registered on the Vast
+      # account (Vast installs account keys on every new box).
       - ${VAST_SSH_KEY:-~/.ssh/vast_ai}:/run/secrets/vast_ssh_key:ro
-      - ${VAST_SSH_KEY:-~/.ssh/vast_ai}.pub:/run/secrets/vast_ssh_key.pub:ro
     restart: unless-stopped
 
 volumes:
